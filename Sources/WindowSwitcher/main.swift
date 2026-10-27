@@ -16,12 +16,23 @@ struct SwitchableWindow: Identifiable, Hashable {
 }
 
 final class WindowCatalog {
+    private var recentIDs: [CGWindowID] = []
+    private var trackingTimer: Timer?
+
+    func startTracking() {
+        guard trackingTimer == nil else { return }
+        trackingTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
+            self?.recordFrontmostWindow()
+        }
+        recordFrontmostWindow()
+    }
+
     func windows() -> [SwitchableWindow] {
         guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return [] }
-        // CGWindowListCopyWindowInfo returns windows from front to back. Keep
-        // that order so the switcher reflects recent use instead of sorting
-        // by title.
-        return list.compactMap { info in
+        // Capture a focus change that happened just before Command+Tab.
+        recordFrontmostWindow(in: list)
+
+        let current = list.compactMap { info -> SwitchableWindow? in
             guard let number = info[kCGWindowNumber as String] as? NSNumber,
                   let ownerPID = info[kCGWindowOwnerPID as String] as? NSNumber,
                   let owner = info[kCGWindowOwnerName as String] as? String,
@@ -44,6 +55,34 @@ final class WindowCatalog {
             let name = title.isEmpty ? owner : title
             return SwitchableWindow(id: CGWindowID(number.uint32Value), title: name, appName: owner, pid: pid, icon: app?.icon ?? NSImage(named: NSImage.applicationIconName)!, frame: frame)
         }
+
+        let currentByID = Dictionary(uniqueKeysWithValues: current.map { ($0.id, $0) })
+        recentIDs.removeAll { currentByID[$0] == nil }
+        let currentOrder = current.map(\.id)
+        let unseen = currentOrder.filter { !recentIDs.contains($0) }
+        recentIDs.append(contentsOf: unseen)
+        return recentIDs.compactMap { currentByID[$0] }
+    }
+
+    private func recordFrontmostWindow() {
+        guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return }
+        recordFrontmostWindow(in: list)
+    }
+
+    private func recordFrontmostWindow(in list: [[String: Any]]) {
+        guard let id = list.compactMap({ info -> CGWindowID? in
+            guard let number = info[kCGWindowNumber as String] as? NSNumber,
+                  let ownerPID = info[kCGWindowOwnerPID as String] as? NSNumber,
+                  let layer = info[kCGWindowLayer as String] as? NSNumber,
+                  let bounds = info[kCGWindowBounds as String] as? [String: Any],
+                  layer.intValue == 0,
+                  ownerPID.int32Value != ProcessInfo.processInfo.processIdentifier,
+                  ((bounds["Width"] as? NSNumber)?.doubleValue ?? 0) > 80,
+                  ((bounds["Height"] as? NSNumber)?.doubleValue ?? 0) > 50 else { return nil }
+            return CGWindowID(number.uint32Value)
+        }).first else { return }
+        recentIDs.removeAll { $0 == id }
+        recentIDs.insert(id, at: 0)
     }
 
     private func isModalOrTransient(pid: pid_t, title: String, frame: CGRect) -> Bool {
@@ -194,6 +233,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.accessory)
         installStatusItem()
         requestAccessibilityPermission()
+        catalog.startTracking()
         installEventTap()
         refresh()
     }
