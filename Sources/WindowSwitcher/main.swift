@@ -78,11 +78,13 @@ final class WindowCatalog {
         var sizeValue: CFTypeRef?
         guard AXUIElementCopyAttributeValue(window, kAXPositionAttribute as CFString, &positionValue) == .success,
               AXUIElementCopyAttributeValue(window, kAXSizeAttribute as CFString, &sizeValue) == .success,
-              let positionValue = positionValue as? AXValue,
-              let sizeValue = sizeValue as? AXValue else { return nil }
+              positionValue != nil,
+              sizeValue != nil else { return nil }
+        let positionAX = positionValue as! AXValue
+        let sizeAX = sizeValue as! AXValue
         var position = CGPoint.zero
         var size = CGSize.zero
-        guard AXValueGetValue(positionValue, .cgPoint, &position), AXValueGetValue(sizeValue, .cgSize, &size) else { return nil }
+        guard AXValueGetValue(positionAX, .cgPoint, &position), AXValueGetValue(sizeAX, .cgSize, &size) else { return nil }
         return CGRect(origin: position, size: size)
     }
 
@@ -120,11 +122,13 @@ final class WindowActivator {
         var sizeValue: CFTypeRef?
         guard AXUIElementCopyAttributeValue(window, kAXPositionAttribute as CFString, &positionValue) == .success,
               AXUIElementCopyAttributeValue(window, kAXSizeAttribute as CFString, &sizeValue) == .success,
-              let positionValue = positionValue as? AXValue,
-              let sizeValue = sizeValue as? AXValue else { return nil }
+              positionValue != nil,
+              sizeValue != nil else { return nil }
+        let positionAX = positionValue as! AXValue
+        let sizeAX = sizeValue as! AXValue
         var position = CGPoint.zero
         var size = CGSize.zero
-        guard AXValueGetValue(positionValue, .cgPoint, &position), AXValueGetValue(sizeValue, .cgSize, &size) else { return nil }
+        guard AXValueGetValue(positionAX, .cgPoint, &position), AXValueGetValue(sizeAX, .cgSize, &size) else { return nil }
         return CGRect(origin: position, size: size)
     }
 
