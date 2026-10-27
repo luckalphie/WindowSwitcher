@@ -136,8 +136,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         installStatusItem()
+        requestAccessibilityPermission()
         installEventTap()
         refresh()
+    }
+
+    private func requestAccessibilityPermission() {
+        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+        if !AXIsProcessTrustedWithOptions(options) {
+            NSLog("WindowSwitcher: Accessibility permission is required for Command+Tab")
+        }
     }
 
     private func installStatusItem() {
