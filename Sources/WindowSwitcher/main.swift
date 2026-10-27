@@ -203,19 +203,21 @@ final class WindowActivator {
 struct SwitcherView: View {
     let windows: [SwitchableWindow]
     let selected: Int
+    let onSelect: (Int) -> Void
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Windows").font(.headline).foregroundStyle(.secondary).padding(.horizontal, 4)
             ForEach(Array(windows.enumerated()), id: \.element.id) { index, window in
-                HStack(spacing: 12) {
-                    Image(nsImage: window.icon).resizable().frame(width: 30, height: 30)
-                    VStack(alignment: .leading, spacing: 2) {
+                Button(action: { onSelect(index) }) {
+                    HStack(spacing: 12) {
+                        Image(nsImage: window.icon).resizable().frame(width: 30, height: 30)
                         Text(window.title).lineLimit(1)
+                        Spacer()
+                        if index == selected { Text("⌘Tab").font(.caption2).foregroundStyle(.secondary) }
                     }
-                    Spacer()
-                    if index == selected { Text("⌘Tab").font(.caption2).foregroundStyle(.secondary) }
+                    .padding(.vertical, 5).padding(.horizontal, 8)
                 }
-                .padding(.vertical, 5).padding(.horizontal, 8)
+                .buttonStyle(.plain)
                 .background(index == selected ? Color.accentColor.opacity(0.28) : .clear, in: RoundedRectangle(cornerRadius: 7))
             }
         }.padding(14).frame(width: 460).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
@@ -228,8 +230,11 @@ final class OverlayPanel: NSPanel {
         isFloatingPanel = true; level = .statusBar; hasShadow = true; isOpaque = false; backgroundColor = .clear
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
     }
-    func show(windows: [SwitchableWindow], selected: Int) {
-        contentView = NSHostingView(rootView: SwitcherView(windows: windows, selected: selected))
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { false }
+
+    func show(windows: [SwitchableWindow], selected: Int, onSelect: @escaping (Int) -> Void) {
+        contentView = NSHostingView(rootView: SwitcherView(windows: windows, selected: selected, onSelect: onSelect))
         let size = contentView!.fittingSize; setContentSize(size)
         let screen = NSScreen.main?.visibleFrame ?? .zero
         setFrameOrigin(NSPoint(x: screen.midX - size.width / 2, y: screen.midY - size.height / 2))
@@ -337,10 +342,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard type == .keyDown, flags.contains(.maskCommand), event.getIntegerValueField(.keyboardEventKeycode) == 48 else { return Unmanaged.passUnretained(event) }
         if !sessionActive { refresh(); selected = initialSelection(); sessionActive = true }
         else if panel.isVisible { selected = (selected + 1) % max(windows.count, 1) }
-        if !windows.isEmpty { panel.show(windows: windows, selected: selected) }
+        if !windows.isEmpty {
+            panel.show(windows: windows, selected: selected) { [weak self] index in
+                self?.selectFromMouse(index)
+            }
+        }
         return nil
     }
     private func finish() { panel.orderOut(nil); if !windows.isEmpty { activator.activate(windows[selected]) }; sessionActive = false }
+
+    private func selectFromMouse(_ index: Int) {
+        guard windows.indices.contains(index) else { return }
+        selected = index
+        panel.orderOut(nil)
+        activator.activate(windows[index])
+        sessionActive = false
+    }
 
     private func initialSelection() -> Int {
         windows.count > 1 ? 1 : 0
