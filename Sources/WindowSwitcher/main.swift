@@ -30,7 +30,7 @@ final class WindowCatalog {
             let title = (info[kCGWindowName as String] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             let pid = ownerPID.int32Value
             guard pid != ProcessInfo.processInfo.processIdentifier,
-                  !isModalOrTransient(pid: pid) else { return nil }
+                  !isModalOrTransient(pid: pid, title: title) else { return nil }
             let app = NSRunningApplication(processIdentifier: pid)
             let name = title.isEmpty ? owner : title
             return SwitchableWindow(id: CGWindowID(number.uint32Value), title: name, appName: owner, pid: pid, icon: app?.icon ?? NSImage(named: NSImage.applicationIconName)!)
@@ -41,7 +41,7 @@ final class WindowCatalog {
         }
     }
 
-    private func isModalOrTransient(pid: pid_t) -> Bool {
+    private func isModalOrTransient(pid: pid_t, title: String) -> Bool {
         // Window level is already filtered above. AX subroles catch sheets and dialogs
         // that are still reported at the normal level by some AppKit applications.
         let app = AXUIElementCreateApplication(pid)
@@ -49,6 +49,14 @@ final class WindowCatalog {
         guard AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &value) == .success,
               let windows = value as? [AXUIElement] else { return false }
         for window in windows {
+            var axTitle: CFTypeRef?
+            _ = AXUIElementCopyAttributeValue(window, kAXTitleAttribute as CFString, &axTitle)
+            let candidateTitle = (axTitle as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+
+            // AX reports all windows for an application. Only apply the modal
+            // filter to the matching CG window, so one Edge dialog cannot hide
+            // every other Edge window.
+            if title.isEmpty || candidateTitle != title { continue }
             var subrole: CFTypeRef?
             _ = AXUIElementCopyAttributeValue(window, kAXSubroleAttribute as CFString, &subrole)
             let role = subrole as? String ?? ""
@@ -66,10 +74,19 @@ final class WindowActivator {
         var value: CFTypeRef?
         guard AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &value) == .success,
               let windows = value as? [AXUIElement] else { return }
+        var fallback: AXUIElement?
         for item in windows {
+            if fallback == nil { fallback = item }
+            var axTitle: CFTypeRef?
+            _ = AXUIElementCopyAttributeValue(item, kAXTitleAttribute as CFString, &axTitle)
+            if (axTitle as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) != window.title { continue }
             AXUIElementSetAttributeValue(item, kAXMainAttribute as CFString, true as CFTypeRef)
             AXUIElementSetAttributeValue(item, kAXFocusedAttribute as CFString, true as CFTypeRef)
-            break
+            return
+        }
+        if let fallback {
+            AXUIElementSetAttributeValue(fallback, kAXMainAttribute as CFString, true as CFTypeRef)
+            AXUIElementSetAttributeValue(fallback, kAXFocusedAttribute as CFString, true as CFTypeRef)
         }
     }
 }
@@ -114,7 +131,7 @@ final class OverlayPanel: NSPanel {
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let catalog = WindowCatalog(); private let activator = WindowActivator(); private let panel = OverlayPanel()
-    private var tap: CFMachPort?; private var windows: [SwitchableWindow] = []; private var selected = 0; private var held = false
+    private var tap: CFMachPort?; private var windows: [SwitchableWindow] = []; private var selected = 0; private var held = false; private var sessionActive = false
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         installEventTap()
@@ -128,18 +145,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return delegate.handle(type: type, event: event)
         }
         tap = CGEvent.tapCreate(tap: .cgSessionEventTap, place: .headInsertEventTap, options: .defaultTap, eventsOfInterest: mask, callback: callback, userInfo: Unmanaged.passUnretained(self).toOpaque())
+        if tap == nil { NSLog("WindowSwitcher: unable to install event tap; enable Accessibility permission for WindowSwitcher.app") }
         if let tap { let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0); CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes); CGEvent.tapEnable(tap: tap, enable: true) }
     }
     private func handle(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         let flags = event.flags
-        if type == .flagsChanged { held = flags.contains(.maskCommand); if !held && panel.isVisible { finish(); return nil }; return Unmanaged.passUnretained(event) }
+        if type == .flagsChanged {
+            held = flags.contains(.maskCommand)
+            if held && !sessionActive {
+                refresh()
+                selected = 0
+                sessionActive = true
+            }
+            if !held && sessionActive { finish(); return nil }
+            return Unmanaged.passUnretained(event)
+        }
         guard type == .keyDown, flags.contains(.maskCommand), event.getIntegerValueField(.keyboardEventKeycode) == 48 else { return Unmanaged.passUnretained(event) }
-        if !held { refresh(); selected = 0; held = true }
-        else { selected = (selected + 1) % max(windows.count, 1) }
+        if !sessionActive { refresh(); selected = 0; sessionActive = true }
+        else if panel.isVisible { selected = (selected + 1) % max(windows.count, 1) }
         if !windows.isEmpty { panel.show(windows: windows, selected: selected) }
         return nil
     }
-    private func finish() { panel.orderOut(nil); if !windows.isEmpty { activator.activate(windows[selected]) } }
+    private func finish() { panel.orderOut(nil); if !windows.isEmpty { activator.activate(windows[selected]) }; sessionActive = false }
 }
 
 let app = NSApplication.shared
