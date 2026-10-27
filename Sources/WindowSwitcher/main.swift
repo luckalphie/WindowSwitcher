@@ -244,7 +244,7 @@ final class OverlayPanel: NSPanel {
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let catalog = WindowCatalog(); private let activator = WindowActivator(); private let panel = OverlayPanel()
-    private var tap: CFMachPort?; private var windows: [SwitchableWindow] = []; private var selected = 0; private var held = false; private var sessionActive = false
+    private var tap: CFMachPort?; private var windows: [SwitchableWindow] = []; private var selected = 0; private var held = false; private var sessionActive = false; private var bypassingScreenSharing = false
     private var statusItem: NSStatusItem!
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -323,6 +323,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let flags = event.flags
         if type == .flagsChanged {
             held = flags.contains(.maskCommand)
+            if held && !sessionActive && isScreenSharingFrontmost() {
+                bypassingScreenSharing = true
+                return Unmanaged.passUnretained(event)
+            }
+            if bypassingScreenSharing {
+                if !held { bypassingScreenSharing = false }
+                return Unmanaged.passUnretained(event)
+            }
             if held && !sessionActive {
                 refresh()
                 selected = initialSelection()
@@ -340,6 +348,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return Unmanaged.passUnretained(event)
         }
         guard type == .keyDown, flags.contains(.maskCommand), event.getIntegerValueField(.keyboardEventKeycode) == 48 else { return Unmanaged.passUnretained(event) }
+        if bypassingScreenSharing || isScreenSharingFrontmost() {
+            bypassingScreenSharing = true
+            return Unmanaged.passUnretained(event)
+        }
         if !sessionActive { refresh(); selected = initialSelection(); sessionActive = true }
         else if panel.isVisible { selected = (selected + 1) % max(windows.count, 1) }
         if !windows.isEmpty {
@@ -361,6 +373,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func initialSelection() -> Int {
         windows.count > 1 ? 1 : 0
+    }
+
+    private func isScreenSharingFrontmost() -> Bool {
+        guard let app = NSWorkspace.shared.frontmostApplication else { return false }
+        if ["com.apple.ScreenSharing", "com.apple.screensharing.agent"].contains(app.bundleIdentifier) { return true }
+        return app.localizedName == "屏幕共享" || app.localizedName == "Screen Sharing"
     }
 }
 
