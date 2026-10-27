@@ -34,7 +34,6 @@ final class WindowCatalog {
         let current = list.compactMap { info -> SwitchableWindow? in
             guard let number = info[kCGWindowNumber as String] as? NSNumber,
                   let ownerPID = info[kCGWindowOwnerPID as String] as? NSNumber,
-                  let owner = info[kCGWindowOwnerName as String] as? String,
                   let layer = info[kCGWindowLayer as String] as? NSNumber,
                   layer.intValue == 0,
                   let bounds = info[kCGWindowBounds as String] as? [String: Any],
