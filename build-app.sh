@@ -5,6 +5,7 @@ rm -rf WindowSwitcher.app
 mkdir -p WindowSwitcher.app/Contents/MacOS WindowSwitcher.app/Contents/Resources
 cp .build/release/WindowSwitcher WindowSwitcher.app/Contents/MacOS/WindowSwitcher
 cp Info.plist WindowSwitcher.app/Contents/Info.plist
+cp AppIcon.icns WindowSwitcher.app/Contents/Resources/AppIcon.icns
 # Sign with the persistent local identity so TCC can keep the same designated
 # requirement across rebuilds. Fall back to ad-hoc only on a fresh machine.
 signing_keychain="$HOME/Library/Keychains/login.keychain-db"
