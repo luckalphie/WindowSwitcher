@@ -132,10 +132,59 @@ final class OverlayPanel: NSPanel {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let catalog = WindowCatalog(); private let activator = WindowActivator(); private let panel = OverlayPanel()
     private var tap: CFMachPort?; private var windows: [SwitchableWindow] = []; private var selected = 0; private var held = false; private var sessionActive = false
+    private var statusItem: NSStatusItem!
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        installStatusItem()
         installEventTap()
         refresh()
+    }
+
+    private func installStatusItem() {
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        if let button = statusItem.button {
+            button.image = NSImage(systemSymbolName: "rectangle.on.rectangle", accessibilityDescription: "WindowSwitcher")
+            button.image?.isTemplate = true
+            button.toolTip = "WindowSwitcher"
+        }
+
+        let menu = NSMenu()
+        let refreshItem = NSMenuItem(title: "刷新窗口列表", action: #selector(refreshFromMenu), keyEquivalent: "r")
+        refreshItem.target = self
+        menu.addItem(refreshItem)
+        menu.addItem(.separator())
+
+        let accessibilityItem = NSMenuItem(title: "打开辅助功能设置", action: #selector(openAccessibilitySettings), keyEquivalent: "")
+        accessibilityItem.target = self
+        menu.addItem(accessibilityItem)
+        let screenRecordingItem = NSMenuItem(title: "打开屏幕录制设置", action: #selector(openScreenRecordingSettings), keyEquivalent: "")
+        screenRecordingItem.target = self
+        menu.addItem(screenRecordingItem)
+        menu.addItem(.separator())
+
+        let quitItem = NSMenuItem(title: "退出 WindowSwitcher", action: #selector(quitFromMenu), keyEquivalent: "q")
+        quitItem.target = self
+        menu.addItem(quitItem)
+        statusItem.menu = menu
+    }
+
+    @objc private func refreshFromMenu() { refresh() }
+
+    @objc private func openAccessibilitySettings() {
+        openSettings(anchor: "Privacy_Accessibility")
+    }
+
+    @objc private func openScreenRecordingSettings() {
+        openSettings(anchor: "Privacy_ScreenCapture")
+    }
+
+    private func openSettings(anchor: String) {
+        guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?\(anchor)") else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    @objc private func quitFromMenu() {
+        NSApp.terminate(nil)
     }
     private func refresh() { windows = catalog.windows() }
     private func installEventTap() {
