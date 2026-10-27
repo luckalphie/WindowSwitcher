@@ -9,6 +9,7 @@ struct SwitchableWindow: Identifiable, Hashable {
     let appName: String
     let pid: pid_t
     let icon: NSImage
+    let frame: CGRect
 
     static func == (lhs: Self, rhs: Self) -> Bool { lhs.id == rhs.id }
     func hash(into hasher: inout Hasher) { hasher.combine(id) }
@@ -29,11 +30,17 @@ final class WindowCatalog {
                   ((bounds["Height"] as? NSNumber)?.doubleValue ?? 0) > 50 else { return nil }
             let title = (info[kCGWindowName as String] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             let pid = ownerPID.int32Value
+            let frame = CGRect(
+                x: (bounds["X"] as? NSNumber)?.doubleValue ?? 0,
+                y: (bounds["Y"] as? NSNumber)?.doubleValue ?? 0,
+                width: (bounds["Width"] as? NSNumber)?.doubleValue ?? 0,
+                height: (bounds["Height"] as? NSNumber)?.doubleValue ?? 0
+            )
             guard pid != ProcessInfo.processInfo.processIdentifier,
-                  !isModalOrTransient(pid: pid, title: title) else { return nil }
+                  !isModalOrTransient(pid: pid, title: title, frame: frame) else { return nil }
             let app = NSRunningApplication(processIdentifier: pid)
             let name = title.isEmpty ? owner : title
-            return SwitchableWindow(id: CGWindowID(number.uint32Value), title: name, appName: owner, pid: pid, icon: app?.icon ?? NSImage(named: NSImage.applicationIconName)!)
+            return SwitchableWindow(id: CGWindowID(number.uint32Value), title: name, appName: owner, pid: pid, icon: app?.icon ?? NSImage(named: NSImage.applicationIconName)!, frame: frame)
         }
         .sorted { a, b in
             if a.pid == frontmostPID && b.pid != frontmostPID { return true }
@@ -41,7 +48,7 @@ final class WindowCatalog {
         }
     }
 
-    private func isModalOrTransient(pid: pid_t, title: String) -> Bool {
+    private func isModalOrTransient(pid: pid_t, title: String, frame: CGRect) -> Bool {
         // Window level is already filtered above. AX subroles catch sheets and dialogs
         // that are still reported at the normal level by some AppKit applications.
         let app = AXUIElementCreateApplication(pid)
@@ -53,16 +60,35 @@ final class WindowCatalog {
             _ = AXUIElementCopyAttributeValue(window, kAXTitleAttribute as CFString, &axTitle)
             let candidateTitle = (axTitle as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
 
-            // AX reports all windows for an application. Only apply the modal
-            // filter to the matching CG window, so one Edge dialog cannot hide
-            // every other Edge window.
-            if title.isEmpty || candidateTitle != title { continue }
+            // CG window titles are often empty for Java/Chromium apps. Match by
+            // screen frame first, then use title as a fallback.
+            let matchesTitle = !title.isEmpty && candidateTitle == title
+            let matchesFrame = axFrame(window).map { framesMatch($0, frame) } ?? false
+            if !matchesTitle && !matchesFrame { continue }
             var subrole: CFTypeRef?
             _ = AXUIElementCopyAttributeValue(window, kAXSubroleAttribute as CFString, &subrole)
             let role = subrole as? String ?? ""
             if ["AXDialog", "AXSystemDialog", "AXSheet"].contains(role) { return true }
         }
         return false
+    }
+
+    private func axFrame(_ window: AXUIElement) -> CGRect? {
+        var positionValue: CFTypeRef?
+        var sizeValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(window, kAXPositionAttribute as CFString, &positionValue) == .success,
+              AXUIElementCopyAttributeValue(window, kAXSizeAttribute as CFString, &sizeValue) == .success,
+              let positionValue = positionValue as? AXValue,
+              let sizeValue = sizeValue as? AXValue else { return nil }
+        var position = CGPoint.zero
+        var size = CGSize.zero
+        guard AXValueGetValue(positionValue, .cgPoint, &position), AXValueGetValue(sizeValue, .cgSize, &size) else { return nil }
+        return CGRect(origin: position, size: size)
+    }
+
+    private func framesMatch(_ lhs: CGRect, _ rhs: CGRect) -> Bool {
+        abs(lhs.minX - rhs.minX) < 2 && abs(lhs.minY - rhs.minY) < 2 &&
+        abs(lhs.width - rhs.width) < 2 && abs(lhs.height - rhs.height) < 2
     }
 }
 
@@ -75,19 +101,42 @@ final class WindowActivator {
         guard AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &value) == .success,
               let windows = value as? [AXUIElement] else { return }
         var fallback: AXUIElement?
+        var titleFallback: AXUIElement?
         for item in windows {
             if fallback == nil { fallback = item }
             var axTitle: CFTypeRef?
             _ = AXUIElementCopyAttributeValue(item, kAXTitleAttribute as CFString, &axTitle)
-            if (axTitle as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) != window.title { continue }
-            AXUIElementSetAttributeValue(item, kAXMainAttribute as CFString, true as CFTypeRef)
-            AXUIElementSetAttributeValue(item, kAXFocusedAttribute as CFString, true as CFTypeRef)
-            return
+            if (axTitle as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) == window.title { titleFallback = item }
+            if let frame = axFrame(item), framesMatch(frame, window.frame) {
+                focus(item)
+                return
+            }
         }
-        if let fallback {
-            AXUIElementSetAttributeValue(fallback, kAXMainAttribute as CFString, true as CFTypeRef)
-            AXUIElementSetAttributeValue(fallback, kAXFocusedAttribute as CFString, true as CFTypeRef)
-        }
+        focus(titleFallback ?? fallback)
+    }
+
+    private func axFrame(_ window: AXUIElement) -> CGRect? {
+        var positionValue: CFTypeRef?
+        var sizeValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(window, kAXPositionAttribute as CFString, &positionValue) == .success,
+              AXUIElementCopyAttributeValue(window, kAXSizeAttribute as CFString, &sizeValue) == .success,
+              let positionValue = positionValue as? AXValue,
+              let sizeValue = sizeValue as? AXValue else { return nil }
+        var position = CGPoint.zero
+        var size = CGSize.zero
+        guard AXValueGetValue(positionValue, .cgPoint, &position), AXValueGetValue(sizeValue, .cgSize, &size) else { return nil }
+        return CGRect(origin: position, size: size)
+    }
+
+    private func framesMatch(_ lhs: CGRect, _ rhs: CGRect) -> Bool {
+        abs(lhs.minX - rhs.minX) < 2 && abs(lhs.minY - rhs.minY) < 2 &&
+        abs(lhs.width - rhs.width) < 2 && abs(lhs.height - rhs.height) < 2
+    }
+
+    private func focus(_ window: AXUIElement?) {
+        guard let window else { return }
+        AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, true as CFTypeRef)
+        AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, true as CFTypeRef)
     }
 }
 
