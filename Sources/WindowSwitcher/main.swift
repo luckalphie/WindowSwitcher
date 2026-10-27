@@ -6,7 +6,6 @@ import ApplicationServices
 struct SwitchableWindow: Identifiable, Hashable {
     let id: CGWindowID
     let title: String
-    let appName: String
     let pid: pid_t
     let icon: NSImage
     let frame: CGRect
@@ -49,11 +48,11 @@ final class WindowCatalog {
                 width: (bounds["Width"] as? NSNumber)?.doubleValue ?? 0,
                 height: (bounds["Height"] as? NSNumber)?.doubleValue ?? 0
             )
+            let displayTitle = title.isEmpty ? accessibilityTitle(pid: pid, frame: frame) ?? "未命名窗口" : title
             guard pid != ProcessInfo.processInfo.processIdentifier,
                   !isModalOrTransient(pid: pid, title: title, frame: frame) else { return nil }
             let app = NSRunningApplication(processIdentifier: pid)
-            let name = title.isEmpty ? owner : title
-            return SwitchableWindow(id: CGWindowID(number.uint32Value), title: name, appName: owner, pid: pid, icon: app?.icon ?? NSImage(named: NSImage.applicationIconName)!, frame: frame)
+            return SwitchableWindow(id: CGWindowID(number.uint32Value), title: displayTitle, pid: pid, icon: app?.icon ?? NSImage(named: NSImage.applicationIconName)!, frame: frame)
         }
 
         let currentByID = Dictionary(uniqueKeysWithValues: current.map { ($0.id, $0) })
@@ -114,6 +113,21 @@ final class WindowCatalog {
             if isModal || ["AXDialog", "AXSystemDialog", "AXSheet"].contains(role) { return true }
         }
         return false
+    }
+
+    private func accessibilityTitle(pid: pid_t, frame: CGRect) -> String? {
+        let app = AXUIElementCreateApplication(pid)
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &value) == .success,
+              let windows = value as? [AXUIElement] else { return nil }
+        for window in windows {
+            guard let candidateFrame = axFrame(window), framesMatch(candidateFrame, frame) else { continue }
+            var titleValue: CFTypeRef?
+            _ = AXUIElementCopyAttributeValue(window, kAXTitleAttribute as CFString, &titleValue)
+            let title = (titleValue as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            if !title.isEmpty { return title }
+        }
+        return nil
     }
 
     private func axFrame(_ window: AXUIElement) -> CGRect? {
@@ -198,7 +212,6 @@ struct SwitcherView: View {
                     Image(nsImage: window.icon).resizable().frame(width: 30, height: 30)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(window.title).lineLimit(1)
-                        Text(window.appName).font(.caption).foregroundStyle(.secondary)
                     }
                     Spacer()
                     if index == selected { Text("⌘Tab").font(.caption2).foregroundStyle(.secondary) }
