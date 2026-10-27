@@ -323,7 +323,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 selected = initialSelection()
                 sessionActive = true
             }
-            if !held && sessionActive { finish(); return nil }
+            if !held && sessionActive {
+                if panel.isVisible {
+                    finish()
+                    return nil
+                }
+                // Command by itself is not a switch request. Keep the event
+                // flowing to macOS and discard the temporary session state.
+                sessionActive = false
+            }
             return Unmanaged.passUnretained(event)
         }
         guard type == .keyDown, flags.contains(.maskCommand), event.getIntegerValueField(.keyboardEventKeycode) == 48 else { return Unmanaged.passUnretained(event) }
