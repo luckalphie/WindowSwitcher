@@ -18,7 +18,9 @@ struct SwitchableWindow: Identifiable, Hashable {
 final class WindowCatalog {
     func windows() -> [SwitchableWindow] {
         guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return [] }
-        let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        // CGWindowListCopyWindowInfo returns windows from front to back. Keep
+        // that order so the switcher reflects recent use instead of sorting
+        // by title.
         return list.compactMap { info in
             guard let number = info[kCGWindowNumber as String] as? NSNumber,
                   let ownerPID = info[kCGWindowOwnerPID as String] as? NSNumber,
@@ -41,10 +43,6 @@ final class WindowCatalog {
             let app = NSRunningApplication(processIdentifier: pid)
             let name = title.isEmpty ? owner : title
             return SwitchableWindow(id: CGWindowID(number.uint32Value), title: name, appName: owner, pid: pid, icon: app?.icon ?? NSImage(named: NSImage.applicationIconName)!, frame: frame)
-        }
-        .sorted { a, b in
-            if a.pid == frontmostPID && b.pid != frontmostPID { return true }
-            return a.title.localizedStandardCompare(b.title) == .orderedAscending
         }
     }
 
