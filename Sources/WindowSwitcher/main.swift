@@ -333,7 +333,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             if held && !sessionActive {
                 refresh()
-                selected = initialSelection()
+                selected = initialSelection(reverse: flags.contains(.maskShift))
                 sessionActive = true
             }
             if !held && sessionActive {
@@ -352,8 +352,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             bypassingScreenSharing = true
             return Unmanaged.passUnretained(event)
         }
-        if !sessionActive { refresh(); selected = initialSelection(); sessionActive = true }
-        else if panel.isVisible { selected = (selected + 1) % max(windows.count, 1) }
+        if !sessionActive {
+            refresh()
+            selected = initialSelection(reverse: flags.contains(.maskShift))
+            sessionActive = true
+        } else if !panel.isVisible {
+            // Shift may have been pressed after Command. Resolve direction
+            // from the Tab event before the switcher is first shown.
+            selected = initialSelection(reverse: flags.contains(.maskShift))
+        } else if !windows.isEmpty {
+            let count = windows.count
+            if flags.contains(.maskShift) {
+                selected = (selected - 1 + count) % count
+            } else {
+                selected = (selected + 1) % count
+            }
+        }
         if !windows.isEmpty {
             panel.show(windows: windows, selected: selected) { [weak self] index in
                 self?.selectFromMouse(index)
@@ -371,8 +385,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         sessionActive = false
     }
 
-    private func initialSelection() -> Int {
-        windows.count > 1 ? 1 : 0
+    private func initialSelection(reverse: Bool) -> Int {
+        guard windows.count > 1 else { return 0 }
+        return reverse ? windows.count - 1 : 1
     }
 
     private func isScreenSharingFrontmost() -> Bool {
