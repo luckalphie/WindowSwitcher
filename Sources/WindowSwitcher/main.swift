@@ -28,6 +28,7 @@ final class WindowCatalog {
 
     func windows() -> [SwitchableWindow] {
         guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return [] }
+        let displayBounds = currentDisplayBounds()
         // Capture a focus change that happened just before Command+Tab.
         recordFrontmostWindow(in: list)
 
@@ -47,6 +48,7 @@ final class WindowCatalog {
                 width: (bounds["Width"] as? NSNumber)?.doubleValue ?? 0,
                 height: (bounds["Height"] as? NSNumber)?.doubleValue ?? 0
             )
+            if let displayBounds, !frame.intersects(displayBounds) { return nil }
             let displayTitle = title.isEmpty ? accessibilityTitle(pid: pid, frame: frame) ?? "未命名窗口" : title
             guard pid != ProcessInfo.processInfo.processIdentifier,
                   !isModalOrTransient(pid: pid, title: title, frame: frame) else { return nil }
@@ -68,6 +70,7 @@ final class WindowCatalog {
     }
 
     private func recordFrontmostWindow(in list: [[String: Any]]) {
+        let displayBounds = currentDisplayBounds()
         guard let id = list.compactMap({ info -> CGWindowID? in
             guard let number = info[kCGWindowNumber as String] as? NSNumber,
                   let ownerPID = info[kCGWindowOwnerPID as String] as? NSNumber,
@@ -77,10 +80,29 @@ final class WindowCatalog {
                   ownerPID.int32Value != ProcessInfo.processInfo.processIdentifier,
                   ((bounds["Width"] as? NSNumber)?.doubleValue ?? 0) > 80,
                   ((bounds["Height"] as? NSNumber)?.doubleValue ?? 0) > 50 else { return nil }
+            let frame = CGRect(
+                x: (bounds["X"] as? NSNumber)?.doubleValue ?? 0,
+                y: (bounds["Y"] as? NSNumber)?.doubleValue ?? 0,
+                width: (bounds["Width"] as? NSNumber)?.doubleValue ?? 0,
+                height: (bounds["Height"] as? NSNumber)?.doubleValue ?? 0
+            )
+            if let displayBounds, !frame.intersects(displayBounds) { return nil }
             return CGWindowID(number.uint32Value)
         }).first else { return }
         recentIDs.removeAll { $0 == id }
         recentIDs.insert(id, at: 0)
+    }
+
+    private func currentDisplayBounds() -> CGRect? {
+        let mouse = CGEvent(source: nil)?.location ?? .zero
+        var displayCount: UInt32 = 0
+        var displays = [CGDirectDisplayID](repeating: 0, count: 16)
+        guard CGGetActiveDisplayList(UInt32(displays.count), &displays, &displayCount) == .success else { return nil }
+        for display in displays.prefix(Int(displayCount)) {
+            let bounds = CGDisplayBounds(display)
+            if bounds.contains(mouse) { return bounds }
+        }
+        return CGDisplayBounds(CGMainDisplayID())
     }
 
     private func isModalOrTransient(pid: pid_t, title: String, frame: CGRect) -> Bool {
