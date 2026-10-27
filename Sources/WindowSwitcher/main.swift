@@ -66,9 +66,14 @@ final class WindowCatalog {
             let matchesFrame = axFrame(window).map { framesMatch($0, frame) } ?? false
             if !matchesTitle && !matchesFrame { continue }
             var subrole: CFTypeRef?
+            var modalValue: CFTypeRef?
             _ = AXUIElementCopyAttributeValue(window, kAXSubroleAttribute as CFString, &subrole)
+            _ = AXUIElementCopyAttributeValue(window, kAXModalAttribute as CFString, &modalValue)
             let role = subrole as? String ?? ""
-            if ["AXDialog", "AXSystemDialog", "AXSheet"].contains(role) { return true }
+            let isModal = (modalValue as? NSNumber)?.boolValue == true
+            // Some applications (notably IntelliJ) label normal main windows
+            // as AXDialog. AXModal is the reliable signal for modality.
+            if isModal || ["AXSystemDialog", "AXSheet"].contains(role) { return true }
         }
         return false
     }
