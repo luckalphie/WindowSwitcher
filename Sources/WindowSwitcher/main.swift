@@ -270,19 +270,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             held = flags.contains(.maskCommand)
             if held && !sessionActive {
                 refresh()
-                selected = 0
+                selected = initialSelection()
                 sessionActive = true
             }
             if !held && sessionActive { finish(); return nil }
             return Unmanaged.passUnretained(event)
         }
         guard type == .keyDown, flags.contains(.maskCommand), event.getIntegerValueField(.keyboardEventKeycode) == 48 else { return Unmanaged.passUnretained(event) }
-        if !sessionActive { refresh(); selected = 0; sessionActive = true }
+        if !sessionActive { refresh(); selected = initialSelection(); sessionActive = true }
         else if panel.isVisible { selected = (selected + 1) % max(windows.count, 1) }
         if !windows.isEmpty { panel.show(windows: windows, selected: selected) }
         return nil
     }
     private func finish() { panel.orderOut(nil); if !windows.isEmpty { activator.activate(windows[selected]) }; sessionActive = false }
+
+    private func initialSelection() -> Int {
+        windows.count > 1 ? 1 : 0
+    }
 }
 
 let app = NSApplication.shared
