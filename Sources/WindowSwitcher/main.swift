@@ -16,6 +16,13 @@ struct SwitchableWindow: Identifiable, Hashable {
 }
 
 final class WindowCatalog {
+    private struct AccessibilityWindow {
+        let title: String
+        let subrole: String
+        let isModal: Bool
+        let frame: CGRect
+    }
+
     private var recentIDs: [CGWindowID] = []
     private var trackingTimer: Timer?
 
@@ -30,10 +37,11 @@ final class WindowCatalog {
     func windows() -> [SwitchableWindow] {
         guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return [] }
         let displayBounds = currentDisplayBounds()
+        let stageManagerPIDs = stageManagerApplicationPIDs(in: list)
         // Capture a focus change that happened just before Command+Tab.
         recordFrontmostWindow(in: list)
 
-        let current = list.compactMap { info -> SwitchableWindow? in
+        var current = list.compactMap { info -> SwitchableWindow? in
             guard let number = info[kCGWindowNumber as String] as? NSNumber,
                   let ownerPID = info[kCGWindowOwnerPID as String] as? NSNumber,
                   let layer = info[kCGWindowLayer as String] as? NSNumber,
@@ -51,6 +59,7 @@ final class WindowCatalog {
             )
             if let displayBounds, !frame.intersects(displayBounds) { return nil }
             let app = NSRunningApplication(processIdentifier: pid)
+            if stageManagerPIDs.contains(pid) && isStageManagerThumbnail(frame: frame) { return nil }
             guard pid != ProcessInfo.processInfo.processIdentifier,
                   !isModalOrTransient(pid: pid, title: title, frame: frame) else { return nil }
             let axWindow = title.isEmpty ? accessibilityWindow(pid: pid, frame: frame) : nil
@@ -65,12 +74,74 @@ final class WindowCatalog {
             return SwitchableWindow(id: CGWindowID(number.uint32Value), title: displayTitle, pid: pid, icon: applicationIcon(for: pid, app: app), frame: frame)
         }
 
+        if !stageManagerPIDs.isEmpty {
+            var knownWindows = Set(current.map { windowKey(pid: $0.pid, frame: $0.frame) })
+            for pid in stageManagerPIDs {
+                let app = NSRunningApplication(processIdentifier: pid)
+                for axWindow in accessibilityWindows(pid: pid) {
+                    guard axWindow.subrole == "AXStandardWindow",
+                          !axWindow.isModal,
+                          !axWindow.frame.isEmpty,
+                          axWindow.frame.width > 80,
+                          axWindow.frame.height > 50,
+                          displayBounds == nil || axWindow.frame.intersects(displayBounds!) else { continue }
+                    let title = axWindow.title.isEmpty ? (app?.localizedName ?? "") : axWindow.title
+                    guard !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
+                    let key = windowKey(pid: pid, frame: axWindow.frame)
+                    guard knownWindows.insert(key).inserted else { continue }
+                    current.append(SwitchableWindow(
+                        id: syntheticWindowID(pid: pid, title: title, frame: axWindow.frame),
+                        title: title,
+                        pid: pid,
+                        icon: applicationIcon(for: pid, app: app),
+                        frame: axWindow.frame
+                    ))
+                }
+            }
+        }
+
         let currentByID = Dictionary(uniqueKeysWithValues: current.map { ($0.id, $0) })
         recentIDs.removeAll { currentByID[$0] == nil }
         let currentOrder = current.map(\.id)
         let unseen = currentOrder.filter { !recentIDs.contains($0) }
         recentIDs.append(contentsOf: unseen)
         return recentIDs.compactMap { currentByID[$0] }
+    }
+
+    private func stageManagerApplicationPIDs(in list: [[String: Any]]) -> Set<pid_t> {
+        let hasWindowManager = list.contains { ($0[kCGWindowOwnerName as String] as? String) == "WindowManager" }
+        guard hasWindowManager else { return [] }
+        return Set(list.compactMap { info in
+            guard let ownerPID = info[kCGWindowOwnerPID as String] as? NSNumber,
+                  let layer = info[kCGWindowLayer as String] as? NSNumber,
+                  layer.intValue == 0,
+                  let ownerName = info[kCGWindowOwnerName as String] as? String,
+                  ownerName != "WindowManager",
+                  ownerPID.int32Value != ProcessInfo.processInfo.processIdentifier,
+                  let bounds = info[kCGWindowBounds as String] as? [String: Any] else { return nil }
+            let width = (bounds["Width"] as? NSNumber)?.doubleValue ?? 0
+            let height = (bounds["Height"] as? NSNumber)?.doubleValue ?? 0
+            return isStageManagerThumbnail(frame: CGRect(x: 0, y: 0, width: width, height: height)) ? ownerPID.int32Value : nil
+        })
+    }
+
+    private func isStageManagerThumbnail(frame: CGRect) -> Bool {
+        frame.width <= 400 && frame.height <= 400
+    }
+
+    private func windowKey(pid: pid_t, frame: CGRect) -> String {
+        "\(pid):\(Int(frame.minX.rounded())):\(Int(frame.minY.rounded())):\(Int(frame.width.rounded())):\(Int(frame.height.rounded()))"
+    }
+
+    private func syntheticWindowID(pid: pid_t, title: String, frame: CGRect) -> CGWindowID {
+        var hasher = Hasher()
+        hasher.combine(pid)
+        hasher.combine(title)
+        hasher.combine(frame.minX)
+        hasher.combine(frame.minY)
+        hasher.combine(frame.width)
+        hasher.combine(frame.height)
+        return UInt32(truncatingIfNeeded: hasher.finalize())
     }
 
     private func recordFrontmostWindow() {
@@ -85,6 +156,7 @@ final class WindowCatalog {
                   let ownerPID = info[kCGWindowOwnerPID as String] as? NSNumber,
                   let layer = info[kCGWindowLayer as String] as? NSNumber,
                   let bounds = info[kCGWindowBounds as String] as? [String: Any],
+                  (info[kCGWindowOwnerName as String] as? String) != "WindowManager",
                   layer.intValue == 0,
                   ownerPID.int32Value != ProcessInfo.processInfo.processIdentifier,
                   ((bounds["Width"] as? NSNumber)?.doubleValue ?? 0) > 80,
@@ -148,13 +220,13 @@ final class WindowCatalog {
         return false
     }
 
-    private func accessibilityWindow(pid: pid_t, frame: CGRect) -> (title: String, subrole: String, isModal: Bool)? {
+    private func accessibilityWindows(pid: pid_t) -> [AccessibilityWindow] {
         let app = AXUIElementCreateApplication(pid)
         var value: CFTypeRef?
         guard AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &value) == .success,
-              let windows = value as? [AXUIElement] else { return nil }
-        for window in windows {
-            guard let candidateFrame = axFrame(window), framesMatch(candidateFrame, frame) else { continue }
+              let windows = value as? [AXUIElement] else { return [] }
+        return windows.compactMap { window in
+            guard let frame = axFrame(window) else { return nil }
             var titleValue: CFTypeRef?
             var subroleValue: CFTypeRef?
             var modalValue: CFTypeRef?
@@ -162,9 +234,18 @@ final class WindowCatalog {
             _ = AXUIElementCopyAttributeValue(window, kAXSubroleAttribute as CFString, &subroleValue)
             _ = AXUIElementCopyAttributeValue(window, kAXModalAttribute as CFString, &modalValue)
             let title = (titleValue as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            return (title, subroleValue as? String ?? "", (modalValue as? NSNumber)?.boolValue == true)
+            return AccessibilityWindow(
+                title: title,
+                subrole: subroleValue as? String ?? "",
+                isModal: (modalValue as? NSNumber)?.boolValue == true,
+                frame: frame
+            )
         }
-        return nil
+    }
+
+    private func accessibilityWindow(pid: pid_t, frame: CGRect) -> (title: String, subrole: String, isModal: Bool)? {
+        guard let window = accessibilityWindows(pid: pid).first(where: { framesMatch($0.frame, frame) }) else { return nil }
+        return (window.title, window.subrole, window.isModal)
     }
 
     private func axFrame(_ window: AXUIElement) -> CGRect? {
