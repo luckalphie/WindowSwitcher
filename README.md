@@ -1,4 +1,4 @@
-# WindowSwitcher
+# Window Switcher
 
 一个替换 macOS Command+Tab 的窗口切换器。它枚举屏幕上的所有普通窗口，同一应用的多个窗口会分别列出；Sheet、Dialog、SystemDialog 以及非普通层级的临时窗口会被过滤。列表显示应用图标、窗口名称和应用名称，不创建缩略图。
 

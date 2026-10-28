@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-    <key>CFBundleName</key><string>WindowSwitcher</string>
-    <key>CFBundleDisplayName</key><string>WindowSwitcher</string>
+    <key>CFBundleName</key><string>Window Switcher</string>
+    <key>CFBundleDisplayName</key><string>Window Switcher</string>
     <key>CFBundleIdentifier</key><string>local.windowswitcher.app</string>
     <key>CFBundleExecutable</key><string>WindowSwitcher</string>
     <key>CFBundlePackageType</key><string>APPL</string>
