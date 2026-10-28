@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 import Carbon.HIToolbox
 import ApplicationServices
+import Darwin
 
 struct SwitchableWindow: Identifiable, Hashable {
     let id: CGWindowID
@@ -49,11 +50,12 @@ final class WindowCatalog {
                 height: (bounds["Height"] as? NSNumber)?.doubleValue ?? 0
             )
             if let displayBounds, !frame.intersects(displayBounds) { return nil }
-            let displayTitle = title.isEmpty ? accessibilityTitle(pid: pid, frame: frame) ?? "未命名窗口" : title
-            guard pid != ProcessInfo.processInfo.processIdentifier,
+            let displayTitle = title.isEmpty ? accessibilityTitle(pid: pid, frame: frame) : title
+            guard let displayTitle, !displayTitle.isEmpty,
+                  pid != ProcessInfo.processInfo.processIdentifier,
                   !isModalOrTransient(pid: pid, title: title, frame: frame) else { return nil }
             let app = NSRunningApplication(processIdentifier: pid)
-            return SwitchableWindow(id: CGWindowID(number.uint32Value), title: displayTitle, pid: pid, icon: app?.icon ?? NSImage(named: NSImage.applicationIconName)!, frame: frame)
+            return SwitchableWindow(id: CGWindowID(number.uint32Value), title: displayTitle, pid: pid, icon: applicationIcon(for: pid, app: app), frame: frame)
         }
 
         let currentByID = Dictionary(uniqueKeysWithValues: current.map { ($0.id, $0) })
@@ -172,6 +174,36 @@ final class WindowCatalog {
     private func framesMatch(_ lhs: CGRect, _ rhs: CGRect) -> Bool {
         abs(lhs.minX - rhs.minX) < 2 && abs(lhs.minY - rhs.minY) < 2 &&
         abs(lhs.width - rhs.width) < 2 && abs(lhs.height - rhs.height) < 2
+    }
+
+    private func applicationIcon(for pid: pid_t, app: NSRunningApplication?) -> NSImage {
+        if let icon = app?.icon { return icon }
+        if let bundleURL = app?.bundleURL {
+            return NSWorkspace.shared.icon(forFile: bundleURL.path)
+        }
+        if let bundleIdentifier = app?.bundleIdentifier,
+           let bundleURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier) {
+            return NSWorkspace.shared.icon(forFile: bundleURL.path)
+        }
+        if let executablePath = processPath(pid) {
+            var url = URL(fileURLWithPath: executablePath)
+            var appURLs: [URL] = []
+            while url.path != "/" {
+                if url.pathExtension == "app" { appURLs.append(url) }
+                url.deleteLastPathComponent()
+            }
+            if let appURL = appURLs.last {
+                return NSWorkspace.shared.icon(forFile: appURL.path)
+            }
+        }
+        return NSImage(named: NSImage.applicationIconName)!
+    }
+
+    private func processPath(_ pid: pid_t) -> String? {
+        var buffer = [CChar](repeating: 0, count: 4096)
+        let length = proc_pidpath(pid, &buffer, UInt32(buffer.count))
+        guard length > 0 else { return nil }
+        return String(cString: buffer)
     }
 }
 
