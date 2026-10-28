@@ -128,10 +128,13 @@ final class WindowCatalog {
             _ = AXUIElementCopyAttributeValue(window, kAXModalAttribute as CFString, &modalValue)
             let role = subrole as? String ?? ""
             let isModal = (modalValue as? NSNumber)?.boolValue == true
+            let isUntitledTransient = role == "AXUnknown" && candidateTitle.isEmpty
             // IntelliJ exposes its modal windows as AXDialog while leaving
             // AXModal false. Match this specific AX window by frame first, so
             // excluding it cannot hide the app's other ordinary windows.
-            if isModal || ["AXDialog", "AXSystemDialog", "AXSheet"].contains(role) { return true }
+            // Chromium/Edge exposes address-bar suggestion popups as untitled
+            // AXUnknown windows; those are transient UI, not switchable windows.
+            if isModal || isUntitledTransient || ["AXDialog", "AXSystemDialog", "AXSheet"].contains(role) { return true }
         }
         return false
     }
