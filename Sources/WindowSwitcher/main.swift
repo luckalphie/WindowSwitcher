@@ -349,7 +349,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let flags = event.flags
         if type == .flagsChanged {
             held = flags.contains(.maskCommand)
-            if held && !sessionActive && isScreenSharingFrontmost() {
+            if held && !sessionActive && isScreenSharingFullscreen() {
                 bypassingScreenSharing = true
                 return Unmanaged.passUnretained(event)
             }
@@ -383,7 +383,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return Unmanaged.passUnretained(event)
         }
         guard type == .keyDown, flags.contains(.maskCommand), event.getIntegerValueField(.keyboardEventKeycode) == 48 else { return Unmanaged.passUnretained(event) }
-        if bypassingScreenSharing || isScreenSharingFrontmost() {
+        if bypassingScreenSharing || isScreenSharingFullscreen() {
             bypassingScreenSharing = true
             return Unmanaged.passUnretained(event)
         }
@@ -452,10 +452,74 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return reverse ? windows.count - 1 : 1
     }
 
-    private func isScreenSharingFrontmost() -> Bool {
-        guard let app = NSWorkspace.shared.frontmostApplication else { return false }
-        if ["com.apple.ScreenSharing", "com.apple.screensharing.agent"].contains(app.bundleIdentifier) { return true }
-        return app.localizedName == "屏幕共享" || app.localizedName == "Screen Sharing"
+    private func isScreenSharingFullscreen() -> Bool {
+        guard let app = NSWorkspace.shared.frontmostApplication,
+              app.bundleIdentifier == "com.apple.ScreenSharing" else { return false }
+
+        let axApp = AXUIElementCreateApplication(app.processIdentifier)
+        var candidates: [AXUIElement] = []
+        for attribute in [kAXFocusedWindowAttribute, kAXMainWindowAttribute] {
+            var value: CFTypeRef?
+            if AXUIElementCopyAttributeValue(axApp, attribute as CFString, &value) == .success,
+               let value {
+                let window = value as! AXUIElement
+                candidates.append(window)
+            }
+        }
+        var windowsValue: CFTypeRef?
+        if AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &windowsValue) == .success,
+           let windows = windowsValue as? [AXUIElement] {
+            candidates.append(contentsOf: windows)
+        }
+
+        // Prefer the explicit AX state. It remains reliable when a full-screen
+        // session uses a display arrangement that does not match the window list.
+        for window in candidates {
+            var fullscreenValue: CFTypeRef?
+            if AXUIElementCopyAttributeValue(window, "AXFullScreen" as CFString, &fullscreenValue) == .success,
+               (fullscreenValue as? NSNumber)?.boolValue == true {
+                return true
+            }
+        }
+
+        guard let displayBounds = currentDisplayBounds() else { return false }
+        let tolerance: CGFloat = 8
+        for window in candidates {
+            guard let frame = axFrame(window) else { continue }
+            let matchesDisplay = abs(frame.minX - displayBounds.minX) <= tolerance &&
+                abs(frame.minY - displayBounds.minY) <= tolerance &&
+                abs(frame.width - displayBounds.width) <= tolerance &&
+                abs(frame.height - displayBounds.height) <= tolerance
+            if matchesDisplay { return true }
+        }
+        return false
+    }
+
+    private func currentDisplayBounds() -> CGRect? {
+        let mouse = CGEvent(source: nil)?.location ?? .zero
+        var displayCount: UInt32 = 0
+        var displays = [CGDirectDisplayID](repeating: 0, count: 16)
+        guard CGGetActiveDisplayList(UInt32(displays.count), &displays, &displayCount) == .success else { return nil }
+        for display in displays.prefix(Int(displayCount)) {
+            let bounds = CGDisplayBounds(display)
+            if bounds.contains(mouse) { return bounds }
+        }
+        return CGDisplayBounds(CGMainDisplayID())
+    }
+
+    private func axFrame(_ window: AXUIElement) -> CGRect? {
+        var positionValue: CFTypeRef?
+        var sizeValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(window, kAXPositionAttribute as CFString, &positionValue) == .success,
+              AXUIElementCopyAttributeValue(window, kAXSizeAttribute as CFString, &sizeValue) == .success,
+              let positionValue,
+              let sizeValue else { return nil }
+        let positionAX = positionValue as! AXValue
+        let sizeAX = sizeValue as! AXValue
+        var position = CGPoint.zero
+        var size = CGSize.zero
+        guard AXValueGetValue(positionAX, .cgPoint, &position), AXValueGetValue(sizeAX, .cgSize, &size) else { return nil }
+        return CGRect(origin: position, size: size)
     }
 }
 
