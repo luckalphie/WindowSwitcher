@@ -266,7 +266,8 @@ final class OverlayPanel: NSPanel {
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let catalog = WindowCatalog(); private let activator = WindowActivator(); private let panel = OverlayPanel()
-    private var tap: CFMachPort?; private var windows: [SwitchableWindow] = []; private var selected = 0; private var held = false; private var sessionActive = false; private var bypassingScreenSharing = false
+    private var tap: CFMachPort?; private var windows: [SwitchableWindow] = []; private var selected = 0; private var held = false; private var sessionActive = false; private var tabPressed = false; private var overlayTimer: Timer?; private var bypassingScreenSharing = false
+    private let overlayDelay: TimeInterval = 0.18
     private var statusItem: NSStatusItem!
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -357,10 +358,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 refresh()
                 selected = initialSelection(reverse: flags.contains(.maskShift))
                 sessionActive = true
+                tabPressed = false
             }
             if !held && sessionActive {
                 if panel.isVisible {
                     finish()
+                    return nil
+                }
+                overlayTimer?.invalidate()
+                overlayTimer = nil
+                if tabPressed && !windows.isEmpty {
+                    activator.activate(windows[selected])
+                    sessionActive = false
+                    tabPressed = false
                     return nil
                 }
                 // Command by itself is not a switch request. Keep the event
@@ -378,33 +388,60 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             refresh()
             selected = initialSelection(reverse: flags.contains(.maskShift))
             sessionActive = true
-        } else if !panel.isVisible {
-            // Shift may have been pressed after Command. Resolve direction
-            // from the Tab event before the switcher is first shown.
-            selected = initialSelection(reverse: flags.contains(.maskShift))
-        } else if !windows.isEmpty {
-            let count = windows.count
-            if flags.contains(.maskShift) {
-                selected = (selected - 1 + count) % count
-            } else {
-                selected = (selected + 1) % count
-            }
         }
-        if !windows.isEmpty {
-            panel.show(windows: windows, selected: selected) { [weak self] index in
-                self?.selectFromMouse(index)
-            }
+        if !tabPressed {
+            tabPressed = true
+            scheduleOverlay()
+        } else if panel.isVisible {
+            cycleSelection(reverse: flags.contains(.maskShift))
+            showPanel()
+        } else if !windows.isEmpty {
+            // A repeated Tab during the delay still changes the eventual target.
+            cycleSelection(reverse: flags.contains(.maskShift))
         }
         return nil
     }
-    private func finish() { panel.orderOut(nil); if !windows.isEmpty { activator.activate(windows[selected]) }; sessionActive = false }
+    private func scheduleOverlay() {
+        overlayTimer?.invalidate()
+        overlayTimer = Timer.scheduledTimer(withTimeInterval: overlayDelay, repeats: false) { [weak self] _ in
+            guard let self else { return }
+            self.overlayTimer = nil
+            guard self.held, self.sessionActive, self.tabPressed else { return }
+            self.showPanel()
+        }
+    }
+
+    private func showPanel() {
+        guard !windows.isEmpty else { return }
+        panel.show(windows: windows, selected: selected) { [weak self] index in
+            self?.selectFromMouse(index)
+        }
+    }
+
+    private func cycleSelection(reverse: Bool) {
+        guard !windows.isEmpty else { return }
+        let count = windows.count
+        selected = reverse ? (selected - 1 + count) % count : (selected + 1) % count
+    }
+
+    private func finish() {
+        overlayTimer?.invalidate()
+        overlayTimer = nil
+        panel.orderOut(nil)
+        if !windows.isEmpty { activator.activate(windows[selected]) }
+        sessionActive = false
+        tabPressed = false
+    }
 
     private func selectFromMouse(_ index: Int) {
         guard windows.indices.contains(index) else { return }
         selected = index
+        overlayTimer?.invalidate()
+        overlayTimer = nil
         panel.orderOut(nil)
         activator.activate(windows[index])
         sessionActive = false
+        tabPressed = false
     }
 
     private func initialSelection(reverse: Bool) -> Int {
