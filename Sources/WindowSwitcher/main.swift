@@ -6,6 +6,7 @@ import Darwin
 
 struct SwitchableWindow: Identifiable, Hashable {
     let id: CGWindowID
+    let appName: String
     let title: String
     let pid: pid_t
     let icon: NSImage
@@ -59,6 +60,7 @@ final class WindowCatalog {
             )
             if let displayBounds, !frame.intersects(displayBounds) { return nil }
             let app = NSRunningApplication(processIdentifier: pid)
+            let appName = app?.localizedName ?? (info[kCGWindowOwnerName as String] as? String ?? "")
             if stageManagerPIDs.contains(pid) && isStageManagerThumbnail(frame: frame) { return nil }
             guard pid != ProcessInfo.processInfo.processIdentifier,
                   !isModalOrTransient(pid: pid, title: title, frame: frame) else { return nil }
@@ -71,7 +73,7 @@ final class WindowCatalog {
                 displayTitle = app?.localizedName ?? info[kCGWindowOwnerName as String] as? String
             }
             guard let displayTitle, !displayTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
-            return SwitchableWindow(id: CGWindowID(number.uint32Value), title: displayTitle, pid: pid, icon: applicationIcon(for: pid, app: app), frame: frame)
+            return SwitchableWindow(id: CGWindowID(number.uint32Value), appName: appName, title: displayTitle, pid: pid, icon: applicationIcon(for: pid, app: app), frame: frame)
         }
 
         if !stageManagerPIDs.isEmpty {
@@ -85,12 +87,14 @@ final class WindowCatalog {
                           axWindow.frame.width > 80,
                           axWindow.frame.height > 50,
                           displayBounds == nil || axWindow.frame.intersects(displayBounds!) else { continue }
-                    let title = axWindow.title.isEmpty ? (app?.localizedName ?? "") : axWindow.title
+                    let appName = app?.localizedName ?? ""
+                    let title = axWindow.title.isEmpty ? appName : axWindow.title
                     guard !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
                     let key = windowKey(pid: pid, frame: axWindow.frame)
                     guard knownWindows.insert(key).inserted else { continue }
                     current.append(SwitchableWindow(
                         id: syntheticWindowID(pid: pid, title: title, frame: axWindow.frame),
+                        appName: appName,
                         title: title,
                         pid: pid,
                         icon: applicationIcon(for: pid, app: app),
@@ -360,7 +364,10 @@ struct SwitcherView: View {
                 Button(action: { onSelect(index) }) {
                     HStack(spacing: 12) {
                         Image(nsImage: window.icon).resizable().frame(width: 30, height: 30)
-                        Text(window.title).lineLimit(1)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(window.appName).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                            Text(window.title).lineLimit(1)
+                        }
                         Spacer()
                         if index == selected { Text("⌘Tab").font(.caption2).foregroundStyle(.secondary) }
                     }
