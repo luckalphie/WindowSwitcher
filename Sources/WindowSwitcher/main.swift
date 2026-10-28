@@ -50,11 +50,18 @@ final class WindowCatalog {
                 height: (bounds["Height"] as? NSNumber)?.doubleValue ?? 0
             )
             if let displayBounds, !frame.intersects(displayBounds) { return nil }
-            let displayTitle = title.isEmpty ? accessibilityTitle(pid: pid, frame: frame) : title
-            guard let displayTitle, !displayTitle.isEmpty,
-                  pid != ProcessInfo.processInfo.processIdentifier,
-                  !isModalOrTransient(pid: pid, title: title, frame: frame) else { return nil }
             let app = NSRunningApplication(processIdentifier: pid)
+            guard pid != ProcessInfo.processInfo.processIdentifier,
+                  !isModalOrTransient(pid: pid, title: title, frame: frame) else { return nil }
+            let axWindow = title.isEmpty ? accessibilityWindow(pid: pid, frame: frame) : nil
+            var displayTitle = title.isEmpty ? axWindow?.title : title
+            if displayTitle == nil || displayTitle?.isEmpty == true {
+                let isOrdinaryWindow = axWindow?.subrole == "AXStandardWindow" && axWindow?.isModal == false
+                let cannotInspectWindows = !AXIsProcessTrusted() && app?.activationPolicy == .regular
+                guard isOrdinaryWindow || cannotInspectWindows else { return nil }
+                displayTitle = app?.localizedName ?? info[kCGWindowOwnerName as String] as? String
+            }
+            guard let displayTitle, !displayTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
             return SwitchableWindow(id: CGWindowID(number.uint32Value), title: displayTitle, pid: pid, icon: applicationIcon(for: pid, app: app), frame: frame)
         }
 
@@ -141,7 +148,7 @@ final class WindowCatalog {
         return false
     }
 
-    private func accessibilityTitle(pid: pid_t, frame: CGRect) -> String? {
+    private func accessibilityWindow(pid: pid_t, frame: CGRect) -> (title: String, subrole: String, isModal: Bool)? {
         let app = AXUIElementCreateApplication(pid)
         var value: CFTypeRef?
         guard AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &value) == .success,
@@ -149,9 +156,13 @@ final class WindowCatalog {
         for window in windows {
             guard let candidateFrame = axFrame(window), framesMatch(candidateFrame, frame) else { continue }
             var titleValue: CFTypeRef?
+            var subroleValue: CFTypeRef?
+            var modalValue: CFTypeRef?
             _ = AXUIElementCopyAttributeValue(window, kAXTitleAttribute as CFString, &titleValue)
+            _ = AXUIElementCopyAttributeValue(window, kAXSubroleAttribute as CFString, &subroleValue)
+            _ = AXUIElementCopyAttributeValue(window, kAXModalAttribute as CFString, &modalValue)
             let title = (titleValue as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            if !title.isEmpty { return title }
+            return (title, subroleValue as? String ?? "", (modalValue as? NSNumber)?.boolValue == true)
         }
         return nil
     }
