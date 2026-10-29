@@ -389,7 +389,9 @@ final class WindowCatalog {
 final class WindowActivator {
     func activate(_ window: SwitchableWindow) {
         guard let app = NSRunningApplication(processIdentifier: window.pid) else { return }
-        app.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+        // Activating all windows makes macOS raise every window belonging to
+        // the app. Activate the app, then focus only the selected AX window.
+        app.activate(options: [.activateIgnoringOtherApps])
         let axApp = AXUIElementCreateApplication(window.pid)
         var value: CFTypeRef?
         guard AXUIElementCopyAttributeValue(axApp, kAXWindowsAttribute as CFString, &value) == .success,
