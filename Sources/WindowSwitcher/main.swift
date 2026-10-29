@@ -67,7 +67,10 @@ final class WindowCatalog {
             if let displayBounds, !frame.intersects(displayBounds) { return nil }
             let app = NSRunningApplication(processIdentifier: pid)
             let appName = app?.localizedName ?? (info[kCGWindowOwnerName as String] as? String ?? "")
-            if stageManagerPIDs.contains(pid) && isStageManagerThumbnail(frame: frame) { return nil }
+            // When Stage Manager is active, CGWindowList may expose only the
+            // group's thumbnail for this PID. Build that app's candidates
+            // from AX windows below so same-size windows are not merged.
+            if stageManagerPIDs.contains(pid) { return nil }
             guard pid != ProcessInfo.processInfo.processIdentifier,
                   !isModalOrTransient(pid: pid, frame: frame) else { return nil }
             let axWindow = accessibilityWindows(pid: pid).first { framesMatch($0.frame, frame) }
@@ -85,7 +88,6 @@ final class WindowCatalog {
         }
 
         if !stageManagerPIDs.isEmpty {
-            var knownWindows = Set(current.map { windowKey(pid: $0.pid, frame: $0.frame) })
             for pid in stageManagerPIDs {
                 let app = NSRunningApplication(processIdentifier: pid)
                 for axWindow in accessibilityWindows(pid: pid) {
@@ -98,8 +100,6 @@ final class WindowCatalog {
                     let appName = app?.localizedName ?? ""
                     let title = axWindow.title.isEmpty ? appName : axWindow.title
                     guard !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
-                    let key = windowKey(pid: pid, frame: axWindow.frame)
-                    guard knownWindows.insert(key).inserted else { continue }
                     current.append(SwitchableWindow(
                         id: accessibilityIdentity(pid: pid, window: axWindow),
                         appName: appName,
@@ -328,9 +328,13 @@ final class WindowCatalog {
 final class WindowActivator {
     func activate(_ window: SwitchableWindow) {
         guard let app = NSRunningApplication(processIdentifier: window.pid) else { return }
-        // Activating all windows makes macOS raise every window belonging to
-        // the app. Activate the app, then focus only the selected AX window.
-        app.activate(options: [.activateIgnoringOtherApps])
+        let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        // Stay inside the current app when switching its windows. Re-activating
+        // the app makes Stage Manager reconsider the whole app group and can
+        // briefly raise the wrong window.
+        if frontmostPID != window.pid {
+            app.activate(options: [.activateIgnoringOtherApps])
+        }
         if let element = window.accessibilityElement {
             focus(element)
             return
@@ -369,6 +373,7 @@ final class WindowActivator {
 
     private func focus(_ window: AXUIElement?) {
         guard let window else { return }
+        AXUIElementPerformAction(window, kAXRaiseAction as CFString)
         AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, true as CFTypeRef)
         AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, true as CFTypeRef)
     }
