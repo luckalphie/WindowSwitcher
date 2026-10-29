@@ -25,15 +25,8 @@ final class WindowCatalog {
     }
 
     private var recentIDs: [CGWindowID] = []
-    private var trackingTimer: Timer?
-
-    func startTracking() {
-        guard trackingTimer == nil else { return }
-        trackingTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
-            self?.recordFrontmostWindow()
-        }
-        recordFrontmostWindow()
-    }
+    private var lastSeen: [CGWindowID: Date] = [:]
+    private let historyRetention: TimeInterval = 30
 
     func windows() -> [SwitchableWindow] {
         guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return [] }
@@ -111,7 +104,17 @@ final class WindowCatalog {
         }
 
         let currentByID = Dictionary(uniqueKeysWithValues: current.map { ($0.id, $0) })
-        recentIDs.removeAll { currentByID[$0] == nil }
+        let now = Date()
+        for id in currentByID.keys { lastSeen[id] = now }
+        // Stage Manager can remove a window from both APIs briefly while it
+        // moves between the active area and the thumbnail rail. Keep its MRU
+        // position for a short grace period, but do not return it unless it is
+        // present in the current filtered window list.
+        recentIDs.removeAll { id in
+            guard currentByID[id] == nil else { return false }
+            guard let seen = lastSeen[id] else { return true }
+            return now.timeIntervalSince(seen) > historyRetention
+        }
         let currentOrder = current.map(\.id)
         let unseen = currentOrder.filter { !recentIDs.contains($0) }
         recentIDs.append(contentsOf: unseen)
@@ -156,11 +159,6 @@ final class WindowCatalog {
         hasher.combine(frame.width)
         hasher.combine(frame.height)
         return UInt32(truncatingIfNeeded: hasher.finalize())
-    }
-
-    private func recordFrontmostWindow() {
-        guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return }
-        recordFrontmostWindow(in: list)
     }
 
     private func recordFrontmostWindow(in list: [[String: Any]]) {
@@ -238,6 +236,7 @@ final class WindowCatalog {
     private func markRecent(_ id: CGWindowID) {
         recentIDs.removeAll { $0 == id }
         recentIDs.insert(id, at: 0)
+        lastSeen[id] = Date()
     }
 
     private func frontmostAccessibilityWindow() -> (pid: pid_t, title: String, frame: CGRect)? {
@@ -492,7 +491,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.accessory)
         installStatusItem()
         requestAccessibilityPermission()
-        catalog.startTracking()
         installEventTap()
         refresh()
     }
