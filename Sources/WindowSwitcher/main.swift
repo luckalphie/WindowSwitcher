@@ -118,6 +118,10 @@ final class WindowCatalog {
         return recentIDs.compactMap { currentByID[$0] }
     }
 
+    func markRecentlyUsed(_ window: SwitchableWindow) {
+        markRecent(window.id)
+    }
+
     private func stageManagerApplicationPIDs(in list: [[String: Any]]) -> Set<pid_t> {
         let hasWindowManager = list.contains { ($0[kCGWindowOwnerName as String] as? String) == "WindowManager" }
         guard hasWindowManager else { return [] }
@@ -162,6 +166,42 @@ final class WindowCatalog {
     private func recordFrontmostWindow(in list: [[String: Any]]) {
         let displayBounds = currentDisplayBounds()
         let stageManagerPIDs = stageManagerApplicationPIDs(in: list)
+
+        // CGWindowList ordering changes while Stage Manager moves an app group
+        // between the active area and the thumbnail rail. Accessibility's
+        // focused window is the actual frontmost window during that transition.
+        if let focused = frontmostAccessibilityWindow(),
+           focused.frame.width > 80,
+           focused.frame.height > 50,
+           displayBounds == nil || focused.frame.intersects(displayBounds!) {
+            let app = NSRunningApplication(processIdentifier: focused.pid)
+            let appName = app?.localizedName ?? ""
+            let resolvedTitle = focused.title.isEmpty ? appName : focused.title
+            if stageManagerPIDs.contains(focused.pid) {
+                markRecent(syntheticWindowID(pid: focused.pid, title: resolvedTitle, frame: focused.frame))
+                return
+            }
+
+            if let number = list.compactMap({ info -> CGWindowID? in
+                guard let ownerPID = info[kCGWindowOwnerPID as String] as? NSNumber,
+                      ownerPID.int32Value == focused.pid,
+                      let layer = info[kCGWindowLayer as String] as? NSNumber,
+                      layer.intValue == 0,
+                      let number = info[kCGWindowNumber as String] as? NSNumber,
+                      let bounds = info[kCGWindowBounds as String] as? [String: Any] else { return nil }
+                let frame = CGRect(
+                    x: (bounds["X"] as? NSNumber)?.doubleValue ?? 0,
+                    y: (bounds["Y"] as? NSNumber)?.doubleValue ?? 0,
+                    width: (bounds["Width"] as? NSNumber)?.doubleValue ?? 0,
+                    height: (bounds["Height"] as? NSNumber)?.doubleValue ?? 0
+                )
+                return framesMatch(frame, focused.frame) ? CGWindowID(number.uint32Value) : nil
+            }).first {
+                markRecent(number)
+                return
+            }
+        }
+
         guard let id = list.compactMap({ info -> CGWindowID? in
             guard let number = info[kCGWindowNumber as String] as? NSNumber,
                   let ownerPID = info[kCGWindowOwnerPID as String] as? NSNumber,
@@ -192,8 +232,33 @@ final class WindowCatalog {
                 ? syntheticWindowID(pid: pid, title: resolvedTitle, frame: frame)
                 : CGWindowID(number.uint32Value)
         }).first else { return }
+        markRecent(id)
+    }
+
+    private func markRecent(_ id: CGWindowID) {
         recentIDs.removeAll { $0 == id }
         recentIDs.insert(id, at: 0)
+    }
+
+    private func frontmostAccessibilityWindow() -> (pid: pid_t, title: String, frame: CGRect)? {
+        guard let app = NSWorkspace.shared.frontmostApplication,
+              app.processIdentifier != ProcessInfo.processInfo.processIdentifier else { return nil }
+        let axApp = AXUIElementCreateApplication(app.processIdentifier)
+        for attribute in [kAXFocusedWindowAttribute, kAXMainWindowAttribute] {
+            var value: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(axApp, attribute as CFString, &value) == .success,
+                  value != nil else { continue }
+            let window = value as! AXUIElement
+            guard let frame = axFrame(window) else { continue }
+            var titleValue: CFTypeRef?
+            _ = AXUIElementCopyAttributeValue(window, kAXTitleAttribute as CFString, &titleValue)
+            return (
+                app.processIdentifier,
+                (titleValue as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines),
+                frame
+            )
+        }
+        return nil
     }
 
     private func currentDisplayBounds() -> CGRect? {
@@ -520,7 +585,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 overlayTimer?.invalidate()
                 overlayTimer = nil
                 if tabPressed && !windows.isEmpty {
-                    activator.activate(windows[selected])
+                    let target = windows[selected]
+                    activator.activate(target)
+                    catalog.markRecentlyUsed(target)
                     sessionActive = false
                     tabPressed = false
                     return nil
@@ -580,7 +647,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         overlayTimer?.invalidate()
         overlayTimer = nil
         panel.orderOut(nil)
-        if !windows.isEmpty { activator.activate(windows[selected]) }
+        if !windows.isEmpty {
+            let target = windows[selected]
+            activator.activate(target)
+            catalog.markRecentlyUsed(target)
+        }
         sessionActive = false
         tabPressed = false
     }
@@ -591,7 +662,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         overlayTimer?.invalidate()
         overlayTimer = nil
         panel.orderOut(nil)
-        activator.activate(windows[index])
+        let target = windows[index]
+        activator.activate(target)
+        catalog.markRecentlyUsed(target)
         sessionActive = false
         tabPressed = false
     }
