@@ -27,6 +27,7 @@ final class WindowCatalog {
     private var recentIDs: [CGWindowID] = []
     private var lastSeen: [CGWindowID: Date] = [:]
     private let historyRetention: TimeInterval = 30
+    private(set) var frontmostID: CGWindowID?
 
     func windows() -> [SwitchableWindow] {
         guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return [] }
@@ -237,6 +238,7 @@ final class WindowCatalog {
         recentIDs.removeAll { $0 == id }
         recentIDs.insert(id, at: 0)
         lastSeen[id] = Date()
+        frontmostID = id
     }
 
     private func frontmostAccessibilityWindow() -> (pid: pid_t, title: String, frame: CGRect)? {
@@ -671,6 +673,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func initialSelection(reverse: Bool) -> Int {
         guard windows.count > 1 else { return 0 }
+        if let currentID = catalog.frontmostID,
+           let currentIndex = windows.firstIndex(where: { $0.id == currentID }) {
+            return reverse
+                ? (currentIndex - 1 + windows.count) % windows.count
+                : (currentIndex + 1) % windows.count
+        }
         return reverse ? windows.count - 1 : 1
     }
 
