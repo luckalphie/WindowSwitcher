@@ -3,6 +3,8 @@
 <plist version="1.0"><dict>
     <key>CFBundleName</key><string>Window Switcher</string>
     <key>CFBundleDisplayName</key><string>Window Switcher</string>
+    <key>CFBundleShortVersionString</key><string>1.0.0</string>
+    <key>CFBundleVersion</key><string>1.0.0</string>
     <key>CFBundleIdentifier</key><string>local.windowswitcher.app</string>
     <key>CFBundleExecutable</key><string>WindowSwitcher</string>
     <key>CFBundlePackageType</key><string>APPL</string>
