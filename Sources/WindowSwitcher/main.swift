@@ -73,7 +73,13 @@ final class WindowCatalog {
                 displayTitle = app?.localizedName ?? info[kCGWindowOwnerName as String] as? String
             }
             guard let displayTitle, !displayTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
-            return SwitchableWindow(id: CGWindowID(number.uint32Value), appName: appName, title: displayTitle, pid: pid, icon: applicationIcon(for: pid, app: app), frame: frame)
+            // Stage Manager can expose the same window once through CGWindowList
+            // and again through Accessibility after it is restored. Use the
+            // same identity in both paths so MRU ordering does not split it.
+            let windowID = stageManagerPIDs.contains(pid)
+                ? syntheticWindowID(pid: pid, title: displayTitle, frame: frame)
+                : CGWindowID(number.uint32Value)
+            return SwitchableWindow(id: windowID, appName: appName, title: displayTitle, pid: pid, icon: applicationIcon(for: pid, app: app), frame: frame)
         }
 
         if !stageManagerPIDs.isEmpty {
@@ -155,6 +161,7 @@ final class WindowCatalog {
 
     private func recordFrontmostWindow(in list: [[String: Any]]) {
         let displayBounds = currentDisplayBounds()
+        let stageManagerPIDs = stageManagerApplicationPIDs(in: list)
         guard let id = list.compactMap({ info -> CGWindowID? in
             guard let number = info[kCGWindowNumber as String] as? NSNumber,
                   let ownerPID = info[kCGWindowOwnerPID as String] as? NSNumber,
@@ -172,7 +179,18 @@ final class WindowCatalog {
                 height: (bounds["Height"] as? NSNumber)?.doubleValue ?? 0
             )
             if let displayBounds, !frame.intersects(displayBounds) { return nil }
-            return CGWindowID(number.uint32Value)
+            let pid = ownerPID.int32Value
+            if stageManagerPIDs.contains(pid) && isStageManagerThumbnail(frame: frame) { return nil }
+
+            let title = (info[kCGWindowName as String] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let app = NSRunningApplication(processIdentifier: pid)
+            let appName = app?.localizedName ?? (info[kCGWindowOwnerName as String] as? String ?? "")
+            let resolvedTitle = title.isEmpty
+                ? (accessibilityWindow(pid: pid, frame: frame)?.title ?? appName)
+                : title
+            return stageManagerPIDs.contains(pid)
+                ? syntheticWindowID(pid: pid, title: resolvedTitle, frame: frame)
+                : CGWindowID(number.uint32Value)
         }).first else { return }
         recentIDs.removeAll { $0 == id }
         recentIDs.insert(id, at: 0)
