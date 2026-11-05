@@ -5,7 +5,7 @@ import ApplicationServices
 import Darwin
 
 enum WindowIdentity: Hashable {
-    case accessibility(AXUIElement)
+    case accessibility(pid: pid_t, elementHash: CFHashCode)
     case coreGraphics(CGWindowID)
 }
 
@@ -40,78 +40,15 @@ final class WindowCatalog {
     private var recentIDs: [WindowIdentity] = []
     private var lastSeen: [WindowIdentity: Date] = [:]
     private let historyRetention: TimeInterval = 30
+    // 台前调度在窗口切换后会短暂回报上一个焦点窗口；该时间内不能让它覆盖 MRU 顺序。
+    private let activationSettlingInterval: TimeInterval = 2
     private(set) var frontmostID: WindowIdentity?
-    private var pendingActivation: (id: WindowIdentity, deadline: Date)?
+    private var pendingActivation: (id: WindowIdentity, pid: pid_t, deadline: Date)?
 
     func windows() -> [SwitchableWindow] {
-        guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return [] }
-        let displayBounds = currentDisplayBounds()
-        let stageManagerPIDs = stageManagerApplicationPIDs(in: list)
-
-        var current = list.compactMap { info -> SwitchableWindow? in
-            guard let number = info[kCGWindowNumber as String] as? NSNumber,
-                  let ownerPID = info[kCGWindowOwnerPID as String] as? NSNumber,
-                  let layer = info[kCGWindowLayer as String] as? NSNumber,
-                  layer.intValue == 0,
-                  let bounds = info[kCGWindowBounds as String] as? [String: Any],
-                  ((bounds["Width"] as? NSNumber)?.doubleValue ?? 0) > 80,
-                  ((bounds["Height"] as? NSNumber)?.doubleValue ?? 0) > 50 else { return nil }
-            let title = (info[kCGWindowName as String] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            let pid = ownerPID.int32Value
-            let frame = CGRect(
-                x: (bounds["X"] as? NSNumber)?.doubleValue ?? 0,
-                y: (bounds["Y"] as? NSNumber)?.doubleValue ?? 0,
-                width: (bounds["Width"] as? NSNumber)?.doubleValue ?? 0,
-                height: (bounds["Height"] as? NSNumber)?.doubleValue ?? 0
-            )
-            if let displayBounds, !frame.intersects(displayBounds) { return nil }
-            let app = NSRunningApplication(processIdentifier: pid)
-            let appName = app?.localizedName ?? (info[kCGWindowOwnerName as String] as? String ?? "")
-            // When Stage Manager is active, CGWindowList may expose only the
-            // group's thumbnail for this PID. Build that app's candidates
-            // from AX windows below so same-size windows are not merged.
-            if stageManagerPIDs.contains(pid) { return nil }
-            guard pid != ProcessInfo.processInfo.processIdentifier,
-                  !isModalOrTransient(pid: pid, frame: frame) else { return nil }
-            let axWindow = accessibilityWindows(pid: pid).first { framesMatch($0.frame, frame) }
-            var displayTitle = title.isEmpty ? axWindow?.title : title
-            if displayTitle == nil || displayTitle?.isEmpty == true {
-                let isOrdinaryWindow = axWindow?.subrole == "AXStandardWindow" && axWindow?.isModal == false
-                let cannotInspectWindows = !AXIsProcessTrusted() && app?.activationPolicy == .regular
-                guard isOrdinaryWindow || cannotInspectWindows else { return nil }
-                displayTitle = app?.localizedName ?? info[kCGWindowOwnerName as String] as? String
-            }
-            guard let displayTitle, !displayTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
-            let windowID = axWindow.map { accessibilityIdentity(pid: pid, window: $0) }
-                ?? .coreGraphics(CGWindowID(number.uint32Value))
-            return SwitchableWindow(id: windowID, appName: appName, title: displayTitle, pid: pid, icon: applicationIcon(for: pid, app: app), frame: frame, accessibilityElement: axWindow?.element)
-        }
-
-        if !stageManagerPIDs.isEmpty {
-            for pid in stageManagerPIDs {
-                let app = NSRunningApplication(processIdentifier: pid)
-                for axWindow in accessibilityWindows(pid: pid) {
-                    guard axWindow.subrole == "AXStandardWindow",
-                          !axWindow.isModal,
-                          !axWindow.frame.isEmpty,
-                          axWindow.frame.width > 80,
-                          axWindow.frame.height > 50,
-                          displayBounds == nil || axWindow.frame.intersects(displayBounds!) else { continue }
-                    let appName = app?.localizedName ?? ""
-                    let title = axWindow.title.isEmpty ? appName : axWindow.title
-                    guard !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
-                    current.append(SwitchableWindow(
-                        id: accessibilityIdentity(pid: pid, window: axWindow),
-                        appName: appName,
-                        title: title,
-                        pid: pid,
-                        icon: applicationIcon(for: pid, app: app),
-                        frame: axWindow.frame,
-                        accessibilityElement: axWindow.element
-                    ))
-                }
-            }
-        }
+        // 台前调度会从 CG 的 on-screen 列表移除非活动组，不能据此限定候选应用。
+        // 统一从 AX 普通窗口生成列表，保证台前调度开关不影响窗口数量与顺序。
+        var current = switchableWindows()
 
         var currentByID: [WindowIdentity: SwitchableWindow] = [:]
         current = current.filter { window in
@@ -120,10 +57,11 @@ final class WindowCatalog {
             return true
         }
         if let focused = frontmostAccessibilityWindow(),
-           let focusedWindow = currentByID[.accessibility(focused.element)] ?? current.first(where: { $0.pid == focused.pid && framesMatch($0.frame, focused.frame) }) {
+           let focusedWindow = matchingWindow(in: current, pid: focused.pid, element: focused.element, frame: focused.frame) {
             let focusedID = focusedWindow.id
-            if let pending = pendingActivation, Date() < pending.deadline, focusedID != pending.id {
-                // Ignore the previous focus while activation is still settling.
+            if let pending = pendingActivation, Date() < pending.deadline, focusedID != pending.id,
+               focused.pid != pending.pid {
+                // 切到另一应用后，台前调度可能短暂回报来源应用的旧焦点。
             } else {
                 pendingActivation = nil
                 markRecent(focusedID)
@@ -148,36 +86,74 @@ final class WindowCatalog {
 
     func markRecentlyUsed(_ window: SwitchableWindow) {
         markRecent(window.id)
-        pendingActivation = (window.id, Date().addingTimeInterval(0.75))
+        pendingActivation = (window.id, window.pid, Date().addingTimeInterval(activationSettlingInterval))
     }
 
-    private func stageManagerApplicationPIDs(in list: [[String: Any]]) -> Set<pid_t> {
-        let hasWindowManager = list.contains { ($0[kCGWindowOwnerName as String] as? String) == "WindowManager" }
-        guard hasWindowManager else { return [] }
-        return Set(list.compactMap { info in
-            guard let ownerPID = info[kCGWindowOwnerPID as String] as? NSNumber,
-                  let layer = info[kCGWindowLayer as String] as? NSNumber,
-                  layer.intValue == 0,
-                  let ownerName = info[kCGWindowOwnerName as String] as? String,
-                  ownerName != "WindowManager",
-                  ownerPID.int32Value != ProcessInfo.processInfo.processIdentifier,
-                  let bounds = info[kCGWindowBounds as String] as? [String: Any] else { return nil }
-            let width = (bounds["Width"] as? NSNumber)?.doubleValue ?? 0
-            let height = (bounds["Height"] as? NSNumber)?.doubleValue ?? 0
-            return isStageManagerThumbnail(frame: CGRect(x: 0, y: 0, width: width, height: height)) ? ownerPID.int32Value : nil
-        })
+    func frontmostWindow(in windows: [SwitchableWindow]) -> SwitchableWindow? {
+        guard let focused = frontmostAccessibilityWindow() else { return nil }
+        return matchingWindow(in: windows, pid: focused.pid, element: focused.element, frame: focused.frame)
     }
 
-    private func isStageManagerThumbnail(frame: CGRect) -> Bool {
-        frame.width <= 400 && frame.height <= 400
+    func matchesFrontmost(_ window: SwitchableWindow) -> Bool {
+        guard let focused = frontmostAccessibilityWindow(), focused.pid == window.pid else { return false }
+        return accessibilityElementsMatch(window.accessibilityElement, focused.element) || framesMatch(window.frame, focused.frame)
     }
 
-    private func windowKey(pid: pid_t, frame: CGRect) -> String {
-        "\(pid):\(Int(frame.minX.rounded())):\(Int(frame.minY.rounded())):\(Int(frame.width.rounded())):\(Int(frame.height.rounded()))"
+    func index(of reference: SwitchableWindow, in windows: [SwitchableWindow]) -> Int? {
+        windows.firstIndex { candidate in
+            candidate.pid == reference.pid &&
+            (accessibilityElementsMatch(candidate.accessibilityElement, reference.accessibilityElement) ||
+                candidate.id == reference.id ||
+                (candidate.title == reference.title && framesMatch(candidate.frame, reference.frame)))
+        }
+    }
+
+    func matches(_ lhs: SwitchableWindow, _ rhs: SwitchableWindow) -> Bool {
+        lhs.pid == rhs.pid &&
+            (accessibilityElementsMatch(lhs.accessibilityElement, rhs.accessibilityElement) || lhs.id == rhs.id)
+    }
+
+    private func switchableWindows() -> [SwitchableWindow] {
+        NSWorkspace.shared.runningApplications.flatMap { app -> [SwitchableWindow] in
+            let pid = app.processIdentifier
+            guard pid != ProcessInfo.processInfo.processIdentifier,
+                  app.activationPolicy == .regular,
+                  !app.isTerminated else { return [] }
+            let appName = app.localizedName ?? ""
+            return accessibilityWindows(pid: pid).compactMap { axWindow in
+                guard axWindow.subrole == "AXStandardWindow",
+                      !axWindow.isModal,
+                      !axWindow.frame.isEmpty,
+                      axWindow.frame.width > 80,
+                      axWindow.frame.height > 50 else { return nil }
+                let title = axWindow.title.isEmpty ? appName : axWindow.title
+                guard !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+                return SwitchableWindow(
+                    id: accessibilityIdentity(pid: pid, window: axWindow),
+                    appName: appName,
+                    title: title,
+                    pid: pid,
+                    icon: applicationIcon(for: pid, app: app),
+                    frame: axWindow.frame,
+                    accessibilityElement: axWindow.element
+                )
+            }
+        }
     }
 
     private func accessibilityIdentity(pid: pid_t, window: AccessibilityWindow) -> WindowIdentity {
-        return .accessibility(window.element)
+        // CFHash 与 CFEqual 一致，既能跨 AX 包装对象保持稳定，也能区分同应用中几何位置相同的窗口。
+        return .accessibility(pid: pid, elementHash: CFHash(window.element))
+    }
+
+    private func accessibilityElementsMatch(_ lhs: AXUIElement?, _ rhs: AXUIElement?) -> Bool {
+        guard let lhs, let rhs else { return false }
+        return CFEqual(lhs, rhs)
+    }
+
+    private func matchingWindow(in windows: [SwitchableWindow], pid: pid_t, element: AXUIElement, frame: CGRect) -> SwitchableWindow? {
+        windows.first { $0.pid == pid && accessibilityElementsMatch($0.accessibilityElement, element) }
+            ?? windows.first { $0.pid == pid && framesMatch($0.frame, frame) }
     }
 
     private func markRecent(_ id: WindowIdentity) {
@@ -382,26 +358,37 @@ final class WindowActivator {
 struct SwitcherView: View {
     let windows: [SwitchableWindow]
     let selected: Int
+    let maximumHeight: CGFloat
     let onSelect: (Int) -> Void
+
+    private var listHeight: CGFloat {
+        min(maximumHeight - 54, max(44, CGFloat(windows.count) * 50))
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Windows").font(.headline).foregroundStyle(.secondary).padding(.horizontal, 4)
-            ForEach(Array(windows.enumerated()), id: \.element.id) { index, window in
-                Button(action: { onSelect(index) }) {
-                    HStack(spacing: 12) {
-                        Image(nsImage: window.icon).resizable().frame(width: 30, height: 30)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(window.appName).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                            Text(window.title).lineLimit(1)
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 8) {
+                    ForEach(Array(windows.enumerated()), id: \.element.id) { index, window in
+                        Button(action: { onSelect(index) }) {
+                            HStack(spacing: 12) {
+                                Image(nsImage: window.icon).resizable().frame(width: 30, height: 30)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(window.appName).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                                    Text(window.title).lineLimit(1)
+                                }
+                                Spacer()
+                                if index == selected { Text("⌘Tab").font(.caption2).foregroundStyle(.secondary) }
+                            }
+                            .padding(.vertical, 5).padding(.horizontal, 8)
                         }
-                        Spacer()
-                        if index == selected { Text("⌘Tab").font(.caption2).foregroundStyle(.secondary) }
+                        .buttonStyle(.plain)
+                        .background(index == selected ? Color.accentColor.opacity(0.28) : .clear, in: RoundedRectangle(cornerRadius: 7))
                     }
-                    .padding(.vertical, 5).padding(.horizontal, 8)
                 }
-                .buttonStyle(.plain)
-                .background(index == selected ? Color.accentColor.opacity(0.28) : .clear, in: RoundedRectangle(cornerRadius: 7))
             }
+            .frame(height: listHeight)
         }.padding(14).frame(width: 460).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
     }
 }
@@ -416,10 +403,12 @@ final class OverlayPanel: NSPanel {
     override var canBecomeMain: Bool { false }
 
     func show(windows: [SwitchableWindow], selected: Int, onSelect: @escaping (Int) -> Void) {
-        contentView = NSHostingView(rootView: SwitcherView(windows: windows, selected: selected, onSelect: onSelect))
+        let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) }) ?? NSScreen.main
+        let maximumHeight = max(160, (screen?.visibleFrame.height ?? 0) - 80)
+        contentView = NSHostingView(rootView: SwitcherView(windows: windows, selected: selected, maximumHeight: maximumHeight, onSelect: onSelect))
         let size = contentView!.fittingSize; setContentSize(size)
-        let screen = NSScreen.main?.visibleFrame ?? .zero
-        setFrameOrigin(NSPoint(x: screen.midX - size.width / 2, y: screen.midY - size.height / 2))
+        let visibleFrame = screen?.visibleFrame ?? .zero
+        setFrameOrigin(NSPoint(x: visibleFrame.midX - size.width / 2, y: visibleFrame.midY - size.height / 2))
         orderFrontRegardless()
     }
 }
@@ -427,6 +416,7 @@ final class OverlayPanel: NSPanel {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let catalog = WindowCatalog(); private let activator = WindowActivator(); private let panel = OverlayPanel()
     private var tap: CFMachPort?; private var windows: [SwitchableWindow] = []; private var selected = 0; private var held = false; private var sessionActive = false; private var tabPressed = false; private var overlayTimer: Timer?; private var bypassingScreenSharing = false
+    private var sessionOrigin: SwitchableWindow?; private var lastActivatedWindow: SwitchableWindow?; private var lastSwitchSource: SwitchableWindow?
     private let overlayDelay: TimeInterval = 0.18
     private var statusItem: NSStatusItem!
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -515,6 +505,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             if held && !sessionActive {
                 refresh()
+                sessionOrigin = catalog.frontmostWindow(in: windows)
                 selected = initialSelection(reverse: flags.contains(.maskShift))
                 sessionActive = true
                 tabPressed = false
@@ -528,8 +519,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 overlayTimer = nil
                 if tabPressed && !windows.isEmpty {
                     let target = windows[selected]
-                    activator.activate(target)
-                    catalog.markRecentlyUsed(target)
+                    activateSelection(target)
                     sessionActive = false
                     tabPressed = false
                     return nil
@@ -537,6 +527,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // Command by itself is not a switch request. Keep the event
                 // flowing to macOS and discard the temporary session state.
                 sessionActive = false
+                sessionOrigin = nil
             }
             return Unmanaged.passUnretained(event)
         }
@@ -547,6 +538,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         if !sessionActive {
             refresh()
+            sessionOrigin = catalog.frontmostWindow(in: windows)
             selected = initialSelection(reverse: flags.contains(.maskShift))
             sessionActive = true
         }
@@ -591,8 +583,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.orderOut(nil)
         if !windows.isEmpty {
             let target = windows[selected]
-            activator.activate(target)
-            catalog.markRecentlyUsed(target)
+            activateSelection(target)
         }
         sessionActive = false
         tabPressed = false
@@ -605,14 +596,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         overlayTimer = nil
         panel.orderOut(nil)
         let target = windows[index]
-        activator.activate(target)
-        catalog.markRecentlyUsed(target)
+        activateSelection(target)
         sessionActive = false
         tabPressed = false
     }
 
     private func initialSelection(reverse: Bool) -> Int {
         guard windows.count > 1 else { return 0 }
+        if !reverse,
+           let lastActivatedWindow,
+           let lastSwitchSource,
+           catalog.matchesFrontmost(lastActivatedWindow),
+           let sourceIndex = catalog.index(of: lastSwitchSource, in: windows) {
+            return sourceIndex
+        }
         if let currentID = catalog.frontmostID,
            let currentIndex = windows.firstIndex(where: { $0.id == currentID }) {
             return reverse
@@ -620,6 +617,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 : (currentIndex + 1) % windows.count
         }
         return reverse ? windows.count - 1 : 1
+    }
+
+    private func activateSelection(_ target: SwitchableWindow) {
+        if let sessionOrigin, !catalog.matches(sessionOrigin, target) {
+            lastSwitchSource = sessionOrigin
+            lastActivatedWindow = target
+        }
+        activator.activate(target)
+        catalog.markRecentlyUsed(target)
+        sessionOrigin = nil
     }
 
     private func isScreenSharingFullscreen() -> Bool {
