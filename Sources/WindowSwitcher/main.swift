@@ -48,7 +48,7 @@ final class WindowCatalog {
     func windows() -> [SwitchableWindow] {
         // 台前调度会从 CG 的 on-screen 列表移除非活动组，不能据此限定候选应用。
         // 统一从 AX 普通窗口生成列表，保证台前调度开关不影响窗口数量与顺序。
-        var current = switchableWindows()
+        var current = switchableWindows(displayBounds: currentDisplayBounds())
 
         var currentByID: [WindowIdentity: SwitchableWindow] = [:]
         current = current.filter { window in
@@ -113,7 +113,7 @@ final class WindowCatalog {
             (accessibilityElementsMatch(lhs.accessibilityElement, rhs.accessibilityElement) || lhs.id == rhs.id)
     }
 
-    private func switchableWindows() -> [SwitchableWindow] {
+    private func switchableWindows(displayBounds: CGRect?) -> [SwitchableWindow] {
         NSWorkspace.shared.runningApplications.flatMap { app -> [SwitchableWindow] in
             let pid = app.processIdentifier
             guard pid != ProcessInfo.processInfo.processIdentifier,
@@ -125,7 +125,8 @@ final class WindowCatalog {
                       !axWindow.isModal,
                       !axWindow.frame.isEmpty,
                       axWindow.frame.width > 80,
-                      axWindow.frame.height > 50 else { return nil }
+                      axWindow.frame.height > 50,
+                      displayBounds == nil || displayBounds!.contains(CGPoint(x: axWindow.frame.midX, y: axWindow.frame.midY)) else { return nil }
                 let title = axWindow.title.isEmpty ? appName : axWindow.title
                 guard !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
                 return SwitchableWindow(
