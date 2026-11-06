@@ -18,3 +18,11 @@ swift run
 swift build -c release
 ./build-app.sh
 ```
+
+创建可直接拖入“应用程序”目录安装的 DMG：
+
+```sh
+./build-dmg.sh
+```
+
+本地产物统一生成在 `dist/`。
