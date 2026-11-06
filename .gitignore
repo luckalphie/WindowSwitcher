@@ -4,3 +4,4 @@
 *.xcodeproj/xcuserdata/
 *.xcworkspace/xcuserdata/
 Window Switcher.app/
+dist/

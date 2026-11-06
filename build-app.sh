@@ -10,7 +10,9 @@ if ! security find-certificate -c "$signing_identity" >/dev/null 2>&1; then
 fi
 
 swift build -c release
-app_bundle="Window Switcher.app"
+output_dir="dist"
+app_bundle="$output_dir/Window Switcher.app"
+mkdir -p "$output_dir"
 rm -rf "$app_bundle"
 mkdir -p "$app_bundle/Contents/MacOS" "$app_bundle/Contents/Resources"
 cp .build/release/WindowSwitcher "$app_bundle/Contents/MacOS/WindowSwitcher"
