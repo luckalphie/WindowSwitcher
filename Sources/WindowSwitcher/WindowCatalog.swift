@@ -3,6 +3,7 @@ import SwiftUI
 import Carbon.HIToolbox
 import ApplicationServices
 import Darwin
+// 相当于窗口查询服务：从 macOS Accessibility（AX）接口读取窗口，再维护本进程内的 MRU 顺序。
 final class WindowCatalog {
     private struct AccessibilityWindow {
         let element: AXUIElement
@@ -18,6 +19,7 @@ final class WindowCatalog {
         let frame: CGRect
     }
 
+    // recentIDs 的首项是最近使用窗口；它是 Cmd+Tab 默认选中“上一个窗口”的依据。
     private var recentIDs: [WindowIdentity] = []
     private var lastSeen: [WindowIdentity: Date] = [:]
     private let historyRetention: TimeInterval = 30
@@ -31,6 +33,7 @@ final class WindowCatalog {
         // 统一从 AX 普通窗口生成列表，保证台前调度开关不影响窗口数量与顺序。
         var current = switchableWindows(displayBounds: currentDisplayBounds())
 
+        // 先按稳定 ID 去重，再把本次查询结果回填到已有 MRU 队列；查询顺序不会直接决定展示顺序。
         var currentByID: [WindowIdentity: SwitchableWindow] = [:]
         current = current.filter { window in
             guard currentByID[window.id] == nil else { return false }
@@ -95,6 +98,8 @@ final class WindowCatalog {
     }
 
     private func switchableWindows(displayBounds: CGRect?) -> [SwitchableWindow] {
+        // AX 是跨进程 UI 自动化接口；这里类似批量调用各应用的“列出窗口”能力。
+        // 不依赖 CG 的 on-screen 列表，避免台前调度隐藏非活动窗口组时遗漏候选。
         NSWorkspace.shared.runningApplications.flatMap { app -> [SwitchableWindow] in
             let pid = app.processIdentifier
             guard pid != ProcessInfo.processInfo.processIdentifier,
@@ -107,6 +112,7 @@ final class WindowCatalog {
                       !axWindow.frame.isEmpty,
                       axWindow.frame.width > 80,
                       axWindow.frame.height > 50,
+                      // 窗口跨屏时按中心点归属，避免其他显示器的窗口混入当前列表。
                       displayBounds == nil || displayBounds!.contains(CGPoint(x: axWindow.frame.midX, y: axWindow.frame.midY)) else { return nil }
                 let title = axWindow.title.isEmpty ? appName : axWindow.title
                 guard !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }

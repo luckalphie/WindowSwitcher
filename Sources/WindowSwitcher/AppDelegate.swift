@@ -3,8 +3,10 @@ import SwiftUI
 import Carbon.HIToolbox
 import ApplicationServices
 import Darwin
+// 应用协调器：管理菜单栏、全局键盘监听，以及一次 Cmd 按下到松开的切换会话。
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let catalog = WindowCatalog(); private let activator = WindowActivator(); private let panel = OverlayPanel()
+    // tap 是系统级键盘事件监听。它不是普通 AppKit 快捷键，因此需要辅助功能授权。
     private var tap: CFMachPort?; private var windows: [SwitchableWindow] = []; private var selected = 0; private var held = false; private var sessionActive = false; private var tabPressed = false; private var overlayTimer: Timer?; private var bypassingScreenSharing = false
     private var sessionOrigin: SwitchableWindow?; private var lastActivatedWindow: SwitchableWindow?; private var lastSwitchSource: SwitchableWindow?
     private let overlayDelay: TimeInterval = 0.18
@@ -98,6 +100,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         let flags = event.flags
         if type == .flagsChanged {
+            // Command 按下时创建一次切换会话；松开时提交当前选中的窗口。
             held = flags.contains(.maskCommand)
             if held && !sessionActive && isScreenSharingFullscreen() {
                 bypassingScreenSharing = true
@@ -214,6 +217,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
            let sourceIndex = catalog.index(of: lastSwitchSource, in: windows) {
             return sourceIndex
         }
+        // 没有可复用的“上次切换对”时，按 Catalog 维护的 MRU 队列选择相邻窗口。
         if let currentID = catalog.frontmostID,
            let currentIndex = windows.firstIndex(where: { $0.id == currentID }) {
             return reverse

@@ -3,6 +3,7 @@ import SwiftUI
 import Carbon.HIToolbox
 import ApplicationServices
 import Darwin
+// 相当于窗口命令服务：先把所属应用置前，再通过 AX 将具体窗口设为主窗口和焦点窗口。
 final class WindowActivator {
     func activate(_ window: SwitchableWindow) {
         guard let app = NSRunningApplication(processIdentifier: window.pid) else { return }
@@ -14,6 +15,7 @@ final class WindowActivator {
             app.activate(options: [.activateIgnoringOtherApps])
         }
         if let element = window.accessibilityElement {
+            // 正常路径直接使用 Catalog 已保存的 AX 对象，避免按 frame 二次查找误命中同尺寸窗口。
             focus(element)
             return
         }
