@@ -3,14 +3,16 @@ import SwiftUI
 import Carbon.HIToolbox
 import ApplicationServices
 import Darwin
+import ServiceManagement
 // 应用协调器：管理菜单栏、全局键盘监听，以及一次 Cmd 按下到松开的切换会话。
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let catalog = WindowCatalog(); private let activator = WindowActivator(); private let panel = OverlayPanel()
     // tap 是系统级键盘事件监听。它不是普通 AppKit 快捷键，因此需要辅助功能授权。
-    private var tap: CFMachPort?; private var windows: [SwitchableWindow] = []; private var selected = 0; private var held = false; private var sessionActive = false; private var tabPressed = false; private var overlayTimer: Timer?; private var bypassingScreenSharing = false
+    private var tap: CFMachPort?; private var windows: [SwitchableWindow] = []; private var selected = 0; private var held = false; private var sessionActive = false; private var tabPressed = false; private var overlayTimer: Timer?; private var bypassingFullscreenApplication = false
     private var sessionOrigin: SwitchableWindow?; private var lastActivatedWindow: SwitchableWindow?; private var lastSwitchSource: SwitchableWindow?
     private let overlayDelay: TimeInterval = 0.18
     private var statusItem: NSStatusItem!
+    private var launchAtLoginItem: NSMenuItem?
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         installStatusItem()
@@ -40,17 +42,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(refreshItem)
         menu.addItem(.separator())
 
+        let launchAtLoginItem = NSMenuItem(title: "开机自动启动", action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
+        launchAtLoginItem.target = self
+        menu.addItem(launchAtLoginItem)
+        self.launchAtLoginItem = launchAtLoginItem
+        updateLaunchAtLoginMenuItem()
+        menu.addItem(.separator())
+
         let accessibilityItem = NSMenuItem(title: "打开辅助功能设置", action: #selector(openAccessibilitySettings), keyEquivalent: "")
         accessibilityItem.target = self
         menu.addItem(accessibilityItem)
-        let screenRecordingItem = NSMenuItem(title: "打开屏幕录制设置", action: #selector(openScreenRecordingSettings), keyEquivalent: "")
-        screenRecordingItem.target = self
-        menu.addItem(screenRecordingItem)
         menu.addItem(.separator())
 
         let quitItem = NSMenuItem(title: "退出 WindowSwitcher", action: #selector(quitFromMenu), keyEquivalent: "q")
         quitItem.target = self
         menu.addItem(quitItem)
+        menu.delegate = self
         statusItem.menu = menu
     }
 
@@ -60,8 +67,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         openSettings(anchor: "Privacy_Accessibility")
     }
 
-    @objc private func openScreenRecordingSettings() {
-        openSettings(anchor: "Privacy_ScreenCapture")
+    // SMAppService 由 macOS 维护登录项状态；不需要在 UserDefaults 中另存一份开关。
+    @objc private func toggleLaunchAtLogin() {
+        let loginItemService = SMAppService.mainApp
+        do {
+            switch loginItemService.status {
+            case .enabled, .requiresApproval:
+                try loginItemService.unregister()
+            case .notRegistered, .notFound:
+                try loginItemService.register()
+            @unknown default:
+                return
+            }
+        } catch {
+            NSLog("WindowSwitcher: unable to update launch-at-login setting: %@", error.localizedDescription)
+            let alert = NSAlert()
+            alert.messageText = "无法修改开机自动启动"
+            alert.informativeText = "请确认应用已安装到“应用程序”目录后重试。\n\(error.localizedDescription)"
+            alert.alertStyle = .warning
+            alert.runModal()
+        }
+        updateLaunchAtLoginMenuItem()
+    }
+
+    // 用户也可能在系统设置中修改登录项，所以每次展开菜单时重新读取系统状态。
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        updateLaunchAtLoginMenuItem()
+    }
+
+    private func updateLaunchAtLoginMenuItem() {
+        let status = SMAppService.mainApp.status
+        launchAtLoginItem?.state = switch status {
+        case .enabled, .requiresApproval: .on
+        case .notRegistered, .notFound: .off
+        @unknown default: .off
+        }
     }
 
     private func openSettings(anchor: String) {
@@ -102,12 +142,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if type == .flagsChanged {
             // Command 按下时创建一次切换会话；松开时提交当前选中的窗口。
             held = flags.contains(.maskCommand)
-            if held && !sessionActive && isScreenSharingFullscreen() {
-                bypassingScreenSharing = true
+            if held && !sessionActive && isFrontmostApplicationFullscreen() {
+                bypassingFullscreenApplication = true
                 return Unmanaged.passUnretained(event)
             }
-            if bypassingScreenSharing {
-                if !held { bypassingScreenSharing = false }
+            if bypassingFullscreenApplication {
+                if !held { bypassingFullscreenApplication = false }
                 return Unmanaged.passUnretained(event)
             }
             if held && !sessionActive {
@@ -139,8 +179,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return Unmanaged.passUnretained(event)
         }
         guard type == .keyDown, flags.contains(.maskCommand), event.getIntegerValueField(.keyboardEventKeycode) == 48 else { return Unmanaged.passUnretained(event) }
-        if bypassingScreenSharing || isScreenSharingFullscreen() {
-            bypassingScreenSharing = true
+        if bypassingFullscreenApplication || isFrontmostApplicationFullscreen() {
+            bypassingFullscreenApplication = true
             return Unmanaged.passUnretained(event)
         }
         if !sessionActive {
@@ -237,9 +277,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         sessionOrigin = nil
     }
 
-    private func isScreenSharingFullscreen() -> Bool {
-        guard let app = NSWorkspace.shared.frontmostApplication,
-              app.bundleIdentifier == "com.apple.ScreenSharing" else { return false }
+    // 全屏应用通常有自己的 Cmd+Tab / 键盘交互预期；此时不接管全局热键。
+    private func isFrontmostApplicationFullscreen() -> Bool {
+        guard let app = NSWorkspace.shared.frontmostApplication else { return false }
 
         let axApp = AXUIElementCreateApplication(app.processIdentifier)
         var candidates: [AXUIElement] = []
