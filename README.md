@@ -1,6 +1,6 @@
 # Window Switcher
 
-一个替换 macOS Command+Tab 的窗口切换器。它枚举可切换的普通窗口，同一应用的多个窗口会分别列出；Sheet、Dialog、SystemDialog 以及非普通层级的临时窗口会被过滤。列表显示应用图标、窗口名称和应用名称，不创建缩略图。
+一个替换 macOS Command+Tab 的窗口切换器。它枚举可切换的普通窗口，同一应用的多个窗口会分别列出；Sheet、Dialog、SystemDialog 以及非普通层级的临时窗口会被过滤。对于 DBeaver/SWT 这类未正确标记模态状态的对话框，也会按“有默认操作按钮、无全屏按钮”的特征排除。列表显示应用图标、窗口名称和应用名称，不创建缩略图。
 
 ## 运行
 

@@ -10,6 +10,8 @@ final class WindowCatalog {
         let title: String
         let subrole: String
         let isModal: Bool
+        let hasDefaultButton: Bool
+        let hasFullScreenButton: Bool
         let frame: CGRect
     }
 
@@ -107,8 +109,12 @@ final class WindowCatalog {
                   !app.isTerminated else { return [] }
             let appName = app.localizedName ?? ""
             return accessibilityWindows(pid: pid).compactMap { axWindow in
+                // DBeaver/SWT 的模态对话框会错误地报为 AXStandardWindow 且 AXModal=false。
+                // AXMain 会随焦点切换，不能用于判断；模态对话框稳定表现为有默认操作按钮、无全屏按钮。
+                let isUnmarkedDialog = axWindow.hasDefaultButton && !axWindow.hasFullScreenButton
                 guard axWindow.subrole == "AXStandardWindow",
                       !axWindow.isModal,
+                      !isUnmarkedDialog,
                       !axWindow.frame.isEmpty,
                       axWindow.frame.width > 80,
                       axWindow.frame.height > 50,
@@ -178,37 +184,6 @@ final class WindowCatalog {
         return CGDisplayBounds(CGMainDisplayID())
     }
 
-    private func isModalOrTransient(pid: pid_t, frame: CGRect) -> Bool {
-        // Window level is already filtered above. AX subroles catch sheets and dialogs
-        // that are still reported at the normal level by some AppKit applications.
-        let app = AXUIElementCreateApplication(pid)
-        var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &value) == .success,
-              let windows = value as? [AXUIElement] else { return false }
-        for window in windows {
-            var axTitle: CFTypeRef?
-            _ = AXUIElementCopyAttributeValue(window, kAXTitleAttribute as CFString, &axTitle)
-            let candidateTitle = (axTitle as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-
-            let matchesFrame = axFrame(window).map { framesMatch($0, frame) } ?? false
-            if !matchesFrame { continue }
-            var subrole: CFTypeRef?
-            var modalValue: CFTypeRef?
-            _ = AXUIElementCopyAttributeValue(window, kAXSubroleAttribute as CFString, &subrole)
-            _ = AXUIElementCopyAttributeValue(window, kAXModalAttribute as CFString, &modalValue)
-            let role = subrole as? String ?? ""
-            let isModal = (modalValue as? NSNumber)?.boolValue == true
-            let isUntitledTransient = role == "AXUnknown" && candidateTitle.isEmpty
-            // IntelliJ exposes its modal windows as AXDialog while leaving
-            // AXModal false. Match this specific AX window by frame first, so
-            // excluding it cannot hide the app's other ordinary windows.
-            // Chromium/Edge exposes address-bar suggestion popups as untitled
-            // AXUnknown windows; those are transient UI, not switchable windows.
-            if isModal || isUntitledTransient || ["AXDialog", "AXSystemDialog", "AXSheet"].contains(role) { return true }
-        }
-        return false
-    }
-
     private func accessibilityWindows(pid: pid_t) -> [AccessibilityWindow] {
         let app = AXUIElementCreateApplication(pid)
         var value: CFTypeRef?
@@ -219,15 +194,29 @@ final class WindowCatalog {
             var titleValue: CFTypeRef?
             var subroleValue: CFTypeRef?
             var modalValue: CFTypeRef?
+            var defaultButtonValue: CFTypeRef?
+            var fullScreenButtonValue: CFTypeRef?
             _ = AXUIElementCopyAttributeValue(window, kAXTitleAttribute as CFString, &titleValue)
             _ = AXUIElementCopyAttributeValue(window, kAXSubroleAttribute as CFString, &subroleValue)
             _ = AXUIElementCopyAttributeValue(window, kAXModalAttribute as CFString, &modalValue)
+            let hasDefaultButton = AXUIElementCopyAttributeValue(
+                window,
+                kAXDefaultButtonAttribute as CFString,
+                &defaultButtonValue
+            ) == .success && defaultButtonValue != nil
+            let hasFullScreenButton = AXUIElementCopyAttributeValue(
+                window,
+                kAXFullScreenButtonAttribute as CFString,
+                &fullScreenButtonValue
+            ) == .success && fullScreenButtonValue != nil
             let title = (titleValue as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             return AccessibilityWindow(
                 element: window,
                 title: title,
                 subrole: subroleValue as? String ?? "",
                 isModal: (modalValue as? NSNumber)?.boolValue == true,
+                hasDefaultButton: hasDefaultButton,
+                hasFullScreenButton: hasFullScreenButton,
                 frame: frame
             )
         }

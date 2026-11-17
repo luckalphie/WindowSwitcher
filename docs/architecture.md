@@ -69,6 +69,8 @@ WindowSwitcher/
 
 使用前，用户必须在“系统设置 → 隐私与安全性 → 辅助功能”授权应用。
 
+窗口筛选优先排除 `AXModal`、Sheet 和 Dialog。少数 SWT/Eclipse 应用会把模态对话框错误标记成普通窗口；此时按“存在 `AXDefaultButton` 且不存在 `AXFullScreenButton`”排除。不能只依据 `AXMain`：DBeaver 在对话框获得焦点后会把它标记为主窗口，而把正常主窗口标记为非主窗口。
+
 ### Event Tap
 
 `CGEvent.tapCreate` 注册系统级键盘监听，类似全局拦截器，不是普通窗口内的快捷键回调。macOS 可能因回调超时或用户输入临时禁用监听，因此 `AppDelegate` 收到 `tapDisabledByTimeout` 或 `tapDisabledByUserInput` 时会立即重新启用它。
