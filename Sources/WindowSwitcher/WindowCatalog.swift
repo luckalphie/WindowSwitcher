@@ -25,10 +25,8 @@ final class WindowCatalog {
     private var recentIDs: [WindowIdentity] = []
     private var lastSeen: [WindowIdentity: Date] = [:]
     private let historyRetention: TimeInterval = 30
-    // 台前调度在窗口切换后会短暂回报上一个焦点窗口；该时间内不能让它覆盖 MRU 顺序。
-    private let activationSettlingInterval: TimeInterval = 2
     private(set) var frontmostID: WindowIdentity?
-    private var pendingActivation: (id: WindowIdentity, pid: pid_t, deadline: Date)?
+    private var knownWindows: [SwitchableWindow] = []
 
     func windows() -> [SwitchableWindow] {
         // 台前调度会从 CG 的 on-screen 列表移除非活动组，不能据此限定候选应用。
@@ -42,16 +40,13 @@ final class WindowCatalog {
             currentByID[window.id] = window
             return true
         }
+        knownWindows = current
         if let focused = frontmostAccessibilityWindow(),
            let focusedWindow = matchingWindow(in: current, pid: focused.pid, element: focused.element, frame: focused.frame) {
-            let focusedID = focusedWindow.id
-            if let pending = pendingActivation, Date() < pending.deadline, focusedID != pending.id,
-               focused.pid != pending.pid {
-                // 切到另一应用后，台前调度可能短暂回报来源应用的旧焦点。
-            } else {
-                pendingActivation = nil
-                markRecent(focusedID)
-            }
+            markRecent(focusedWindow.id)
+        } else {
+            // 当前焦点可能不在候选列表中，不能沿用上次焦点并跳过错误的窗口。
+            frontmostID = nil
         }
         let now = Date()
         for id in currentByID.keys { lastSeen[id] = now }
@@ -70,9 +65,18 @@ final class WindowCatalog {
         return recentIDs.compactMap { currentByID[$0] }
     }
 
-    func markRecentlyUsed(_ window: SwitchableWindow) {
-        markRecent(window.id)
-        pendingActivation = (window.id, window.pid, Date().addingTimeInterval(activationSettlingInterval))
+    func recordFocusedWindow(pid: pid_t, element: AXUIElement) {
+        // 只接受精确 AX 身份，不能用相同尺寸/位置猜测同一应用的窗口。
+        if let window = knownWindows.first(where: { $0.pid == pid && accessibilityElementsMatch($0.accessibilityElement, element) }) {
+            markRecent(window.id)
+        } else {
+            // 焦点可能是上次刷新之后新建的窗口；重新发现后再做精确匹配。
+            let current = switchableWindows(displayBounds: nil)
+            knownWindows = current
+            if let window = current.first(where: { $0.pid == pid && accessibilityElementsMatch($0.accessibilityElement, element) }) {
+                markRecent(window.id)
+            }
+        }
     }
 
     func frontmostWindow(in windows: [SwitchableWindow]) -> SwitchableWindow? {
@@ -147,7 +151,6 @@ final class WindowCatalog {
 
     private func matchingWindow(in windows: [SwitchableWindow], pid: pid_t, element: AXUIElement, frame: CGRect) -> SwitchableWindow? {
         windows.first { $0.pid == pid && accessibilityElementsMatch($0.accessibilityElement, element) }
-            ?? windows.first { $0.pid == pid && framesMatch($0.frame, frame) }
     }
 
     private func markRecent(_ id: WindowIdentity) {

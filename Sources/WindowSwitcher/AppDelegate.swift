@@ -9,7 +9,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let catalog = WindowCatalog(); private let activator = WindowActivator(); private let panel = OverlayPanel()
     // tap 是系统级键盘事件监听。它不是普通 AppKit 快捷键，因此需要辅助功能授权。
     private var tap: CFMachPort?; private var windows: [SwitchableWindow] = []; private var selected = 0; private var held = false; private var sessionActive = false; private var tabPressed = false; private var overlayTimer: Timer?; private var bypassingFullscreenApplication = false
-    private var sessionOrigin: SwitchableWindow?; private var lastActivatedWindow: SwitchableWindow?; private var lastSwitchSource: SwitchableWindow?
+    private lazy var focusObserver = WindowFocusObserver { [weak self] pid, element in
+        self?.catalog.recordFocusedWindow(pid: pid, element: element)
+    }
     private let overlayDelay: TimeInterval = 0.18
     private var statusItem: NSStatusItem!
     private var launchAtLoginItem: NSMenuItem?
@@ -17,6 +19,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NSApp.setActivationPolicy(.accessory)
         installStatusItem()
         requestAccessibilityPermission()
+        focusObserver.start()
         installEventTap()
         refresh()
     }
@@ -152,7 +155,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             if held && !sessionActive {
                 refresh()
-                sessionOrigin = catalog.frontmostWindow(in: windows)
                 selected = initialSelection(reverse: flags.contains(.maskShift))
                 sessionActive = true
                 tabPressed = false
@@ -174,7 +176,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 // Command by itself is not a switch request. Keep the event
                 // flowing to macOS and discard the temporary session state.
                 sessionActive = false
-                sessionOrigin = nil
             }
             return Unmanaged.passUnretained(event)
         }
@@ -185,7 +186,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         if !sessionActive {
             refresh()
-            sessionOrigin = catalog.frontmostWindow(in: windows)
             selected = initialSelection(reverse: flags.contains(.maskShift))
             sessionActive = true
         }
@@ -250,31 +250,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func initialSelection(reverse: Bool) -> Int {
         guard windows.count > 1 else { return 0 }
-        if !reverse,
-           let lastActivatedWindow,
-           let lastSwitchSource,
-           catalog.matchesFrontmost(lastActivatedWindow),
-           let sourceIndex = catalog.index(of: lastSwitchSource, in: windows) {
-            return sourceIndex
-        }
-        // 没有可复用的“上次切换对”时，按 Catalog 维护的 MRU 队列选择相邻窗口。
+        // 按实时焦点维护的 MRU 队列选择相邻窗口。
         if let currentID = catalog.frontmostID,
            let currentIndex = windows.firstIndex(where: { $0.id == currentID }) {
             return reverse
                 ? (currentIndex - 1 + windows.count) % windows.count
                 : (currentIndex + 1) % windows.count
         }
-        return reverse ? windows.count - 1 : 1
+        // 当前窗口可能被显示器或窗口类型过滤，不能跳过第一个候选窗口。
+        return reverse ? windows.count - 1 : 0
     }
 
     private func activateSelection(_ target: SwitchableWindow) {
-        if let sessionOrigin, !catalog.matches(sessionOrigin, target) {
-            lastSwitchSource = sessionOrigin
-            lastActivatedWindow = target
-        }
         activator.activate(target)
-        catalog.markRecentlyUsed(target)
-        sessionOrigin = nil
+        // 激活请求可能失败或延迟；只在回读系统焦点后更新 MRU。
+        focusObserver.scheduleRead(target.pid, delay: 0.2)
     }
 
     // 全屏应用通常有自己的 Cmd+Tab / 键盘交互预期；此时不接管全局热键。
