@@ -57,6 +57,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(accessibilityItem)
         menu.addItem(.separator())
 
+        let aboutItem = NSMenuItem(title: "关于 Window Switcher", action: #selector(showAbout), keyEquivalent: "")
+        aboutItem.target = self
+        menu.addItem(aboutItem)
+
         let quitItem = NSMenuItem(title: "退出 WindowSwitcher", action: #selector(quitFromMenu), keyEquivalent: "q")
         quitItem.target = self
         menu.addItem(quitItem)
@@ -65,6 +69,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func refreshFromMenu() { refresh() }
+
+    @objc private func showAbout() {
+        // 系统关于窗口从应用的 Info.plist 读取版本，保持与打包版本一致。
+        NSApp.activate(ignoringOtherApps: true)
+        NSApp.orderFrontStandardAboutPanel(nil)
+    }
 
     @objc private func openAccessibilitySettings() {
         openSettings(anchor: "Privacy_Accessibility")
